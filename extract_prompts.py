@@ -56,9 +56,20 @@ FILES_TO_PROCESS: List[FileConfig] = [
     ),
     FileConfig(
         path="opus_kilo_code_task_feb-19-2026_2-37-48-pm.md",
-        model_label="Opus 2.6",
+        model_label="Opus 4.6",
         session_label="Session 3 - Afternoon (2:37 PM)",
     ),
+    FileConfig(
+        path="opus_kilo_code_task_feb-19-2026_7-34-40-pm.md",
+        model_label="Opus 4.6",
+        session_label="Session 4 - Afternoon (7:34 PM)",
+    ),
+    FileConfig(
+        path="opus_kilo_code_task_feb-19-2026_10-36-17-pm.md",
+        model_label="Opus 4.6",
+        session_label="Session 5 - Afternoon (10:36 PM)",
+    ),
+
 ]
 
 OUTPUT_FILE = "prompt_history.md"
@@ -485,3 +496,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -469,8 +469,8 @@ def _rotate_y(lx, lz, cos_a, sin_a):
     return lx * cos_a + lz * sin_a, -lx * sin_a + lz * cos_a
 
 
-def make_pine_tree(wx, wz, height, angle, rng):
-    """Generate face data for a multi-tier pine tree at world position (wx, 0, wz).
+def make_pine_tree(wx, wz, height, angle, rng, base_y=0.0):
+    """Generate face data for a multi-tier pine tree at world position (wx, base_y, wz).
 
     Returns a list of (verts, center, normal) tuples.
 
@@ -501,8 +501,8 @@ def make_pine_tree(wx, wz, height, angle, rng):
     for lx, lz in [(-tw, -tw), (tw, -tw), (tw, tw), (-tw, tw)]:
         rx, rz = _rotate_y(lx, lz, ca, sa)
         trunk_verts.append((
-            Vec3(wx + rx, 0, wz + rz),
-            Vec3(wx + rx, th, wz + rz),
+            Vec3(wx + rx, base_y, wz + rz),
+            Vec3(wx + rx, base_y + th, wz + rz),
         ))
 
     for i in range(4):
@@ -526,14 +526,14 @@ def make_pine_tree(wx, wz, height, angle, rng):
         progress = t / tier_count   # 0 = bottom tier, 1 = top
         tier_radius = height * (0.38 - 0.10 * progress)
 
-        apex = Vec3(wx, tier_apex_y, wz)
+        apex = Vec3(wx, base_y + tier_apex_y, wz)
         tier_base = []
         for lx, lz in [(-tier_radius, -tier_radius),
                         (tier_radius, -tier_radius),
                         (tier_radius, tier_radius),
                         (-tier_radius, tier_radius)]:
             rx, rz = _rotate_y(lx, lz, ca, sa)
-            tier_base.append(Vec3(wx + rx, tier_base_y, wz + rz))
+            tier_base.append(Vec3(wx + rx, base_y + tier_base_y, wz + rz))
 
         for i in range(4):
             j = (i + 1) % 4
@@ -542,8 +542,8 @@ def make_pine_tree(wx, wz, height, angle, rng):
     return faces
 
 
-def make_rock(wx, wz, scale, angle, rng):
-    """Generate face data for an irregular rock at world position (wx, 0, wz).
+def make_rock(wx, wz, scale, angle, rng, base_y=0.0):
+    """Generate face data for an irregular rock at world position (wx, base_y, wz).
 
     Geometry: irregular tetrahedron = 4 triangular faces.
     """
@@ -558,10 +558,10 @@ def make_rock(wx, wz, scale, angle, rng):
     offz = scale * (rng.random() - 0.5) * 0.3
 
     pts_local = [
-        (-rw, 0, -rw * 0.7),
-        (rw, 0, -rw * 0.5),
-        (rw * 0.3, 0, rw),
-        (offx, rh, offz),
+        (-rw, base_y, -rw * 0.7),
+        (rw, base_y, -rw * 0.5),
+        (rw * 0.3, base_y, rw),
+        (offx, base_y + rh, offz),
     ]
 
     pts = []
@@ -576,8 +576,8 @@ def make_rock(wx, wz, scale, angle, rng):
     return faces
 
 
-def make_bush(wx, wz, scale, angle, rng):
-    """Generate face data for a bush at world position (wx, 0, wz).
+def make_bush(wx, wz, scale, angle, rng, base_y=0.0):
+    """Generate face data for a bush at world position (wx, base_y, wz).
 
     Geometry: low pyramid = 4 triangular faces.
     """
@@ -586,12 +586,12 @@ def make_bush(wx, wz, scale, angle, rng):
 
     bw = scale * 0.4           # base half-width
     bh = scale * 0.35          # height
-    apex = Vec3(wx, bh, wz)
+    apex = Vec3(wx, base_y + bh, wz)
 
     base = []
     for lx, lz in [(-bw, -bw), (bw, -bw), (bw, bw), (-bw, bw)]:
         rx, rz = _rotate_y(lx, lz, ca, sa)
-        base.append(Vec3(wx + rx, 0, wz + rz))
+        base.append(Vec3(wx + rx, base_y, wz + rz))
 
     for i in range(4):
         j = (i + 1) % 4
@@ -623,6 +623,170 @@ def make_ground_quad(cx, cz, chunk_size):
 
 
 # ---------------------------------------------------------------------------
+# Terrain height — procedural noise for hills and valleys
+# ---------------------------------------------------------------------------
+
+def _terrain_hash(ix, iz, seed):
+    """Hash grid coordinates to a pseudo-random height in [0, 1]."""
+    h = (seed * 1103515245 + 12345) & 0xFFFFFFFF
+    h = (h ^ ((ix * 73856093) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    h = ((h * 1103515245 + 12345)
+         ^ ((iz * 19349663) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    return (h & 0xFFFF) / 0xFFFF
+
+
+def terrain_height(wx, wz, seed, scale=8.0, amplitude=2.5):
+    """Return terrain height at world position (wx, wz).
+
+    Uses two octaves of smoothed value noise for rolling hills, plus a
+    separate low-frequency mountain layer that produces rare, very tall
+    peaks with a quadratic power curve.
+
+    A guaranteed landmark mountain is placed near the spawn point
+    (behind the camera start) so there is always a dramatic peak
+    visible for reference.
+    """
+    total = 0.0
+    for octave_scale, octave_amp in ((scale, amplitude),
+                                     (scale * 0.4, amplitude * 0.25)):
+        gx = wx / octave_scale
+        gz = wz / octave_scale
+        ix = int(math.floor(gx))
+        iz = int(math.floor(gz))
+        fx = gx - ix
+        fz = gz - iz
+        # Smoothstep interpolation
+        fx = fx * fx * (3.0 - 2.0 * fx)
+        fz = fz * fz * (3.0 - 2.0 * fz)
+        # Bilinear interpolation of hashed corner values
+        h00 = _terrain_hash(ix, iz, seed)
+        h10 = _terrain_hash(ix + 1, iz, seed)
+        h01 = _terrain_hash(ix, iz + 1, seed)
+        h11 = _terrain_hash(ix + 1, iz + 1, seed)
+        h0 = h00 + (h10 - h00) * fx
+        h1 = h01 + (h11 - h01) * fx
+        total += (h0 + (h1 - h0) * fz) * octave_amp
+
+    # Mountain layer — rare, very large peaks
+    mtn_scale = 70.0
+    mtn_amp = 25.0
+    mtn_seed = seed ^ 0xDEADBEEF
+    gx = wx / mtn_scale
+    gz = wz / mtn_scale
+    ix = int(math.floor(gx))
+    iz = int(math.floor(gz))
+    fx = gx - ix
+    fz = gz - iz
+    fx = fx * fx * (3.0 - 2.0 * fx)
+    fz = fz * fz * (3.0 - 2.0 * fz)
+    h00 = _terrain_hash(ix, iz, mtn_seed)
+    h10 = _terrain_hash(ix + 1, iz, mtn_seed)
+    h01 = _terrain_hash(ix, iz + 1, mtn_seed)
+    h11 = _terrain_hash(ix + 1, iz + 1, mtn_seed)
+    h0 = h00 + (h10 - h00) * fx
+    h1 = h01 + (h11 - h01) * fx
+    mtn_noise = h0 + (h1 - h0) * fz
+    # Threshold + cubic curve → only the highest noise peaks form mountains
+    mtn_factor = max(0.0, (mtn_noise - 0.65) / 0.35)
+    total += mtn_factor * mtn_factor * mtn_factor * mtn_amp
+
+    # Guaranteed landmark mountain near spawn — a steep gaussian peak
+    # behind the camera start position (cam starts at 6,_,6 facing −Z).
+    # Turn around (face +Z) to see it rising above the forest.
+    mtn_cx, mtn_cz = 6.0, 45.0         # 39 units behind spawn
+    mtn_radius = 18.0                   # steep-ish slope
+    mtn_peak = 30.0                     # very tall
+    dmx = wx - mtn_cx
+    dmz = wz - mtn_cz
+    d2 = dmx * dmx + dmz * dmz
+    cutoff = mtn_radius * 3.0           # skip math beyond 3× radius
+    if d2 < cutoff * cutoff:
+        total += mtn_peak * math.exp(-d2 / (2.0 * mtn_radius * mtn_radius))
+
+    return total - amplitude * 0.3    # centre around slightly below zero
+
+
+def make_terrain_grid(cx, cz, chunk_size, seed, grid_res=6):
+    """Generate wireframe terrain quads for chunk (cx, cz).
+
+    Returns a list of (verts, center, normal, edge_str) tuples.
+    The 4th element marks them as wireframe-only faces for the renderer.
+    """
+    TERRAIN_EDGE = '\033[38;2;60;90;45m.\033[0m'
+
+    faces = []
+    cs = chunk_size
+    cell = cs / grid_res
+    x0 = cx * cs
+    z0 = cz * cs
+
+    # Build vertex grid (grid_res+1 × grid_res+1)
+    grid = []
+    for gi in range(grid_res + 1):
+        row = []
+        for gj in range(grid_res + 1):
+            vx = x0 + gi * cell
+            vz = z0 + gj * cell
+            vy = terrain_height(vx, vz, seed)
+            row.append(Vec3(vx, vy, vz))
+        grid.append(row)
+
+    # Generate quads
+    for gi in range(grid_res):
+        for gj in range(grid_res):
+            v00 = grid[gi][gj]
+            v10 = grid[gi + 1][gj]
+            v11 = grid[gi + 1][gj + 1]
+            v01 = grid[gi][gj + 1]
+            face = _make_face([v00, v10, v11, v01])
+            faces.append((face[0], face[1], face[2], TERRAIN_EDGE))
+
+    return faces
+
+
+def chunk_has_mountain(cx, cz, chunk_size, seed, threshold=0.70):
+    """Check whether the chunk at (cx, cz) contains significant mountain terrain.
+
+    Evaluates the mountain noise at the chunk centre — the same low-frequency
+    noise used by ``terrain_height()`` — and returns ``True`` when it exceeds
+    *threshold*.  Also returns ``True`` for chunks near the guaranteed
+    landmark mountain at (6, 45).
+
+    This is used to decide which distant chunks should be loaded as
+    terrain-only so that mountains are visible from far away.
+    """
+    wx = cx * chunk_size + chunk_size * 0.5
+    wz = cz * chunk_size + chunk_size * 0.5
+
+    # Guaranteed landmark mountain near spawn (must match terrain_height())
+    mtn_cx, mtn_cz = 6.0, 45.0
+    mtn_radius = 18.0
+    dmx = wx - mtn_cx
+    dmz = wz - mtn_cz
+    if dmx * dmx + dmz * dmz < (mtn_radius * 3.0) ** 2:
+        return True
+
+    mtn_seed = seed ^ 0xDEADBEEF
+    mtn_scale = 70.0
+    gx = wx / mtn_scale
+    gz = wz / mtn_scale
+    ix = int(math.floor(gx))
+    iz = int(math.floor(gz))
+    fx = gx - ix
+    fz = gz - iz
+    fx = fx * fx * (3.0 - 2.0 * fx)
+    fz = fz * fz * (3.0 - 2.0 * fz)
+    h00 = _terrain_hash(ix, iz, mtn_seed)
+    h10 = _terrain_hash(ix + 1, iz, mtn_seed)
+    h01 = _terrain_hash(ix, iz + 1, mtn_seed)
+    h11 = _terrain_hash(ix + 1, iz + 1, mtn_seed)
+    h0 = h00 + (h10 - h00) * fx
+    h1 = h01 + (h11 - h01) * fx
+    mtn_noise = h0 + (h1 - h0) * fz
+    return mtn_noise > threshold
+
+
+# ---------------------------------------------------------------------------
 # ForestChunk — a single chunk of procedurally generated forest
 # ---------------------------------------------------------------------------
 
@@ -646,10 +810,11 @@ class ForestChunk:
     ]
 
     def __init__(self, cx: int, cz: int, chunk_size: float,
-                 world_seed: int):
+                 world_seed: int, terrain_only: bool = False):
         self.cx = cx
         self.cz = cz
         self.chunk_size = chunk_size
+        self.terrain_only = terrain_only
         self.face_data: list = []
         self._generate(world_seed)
 
@@ -669,6 +834,15 @@ class ForestChunk:
             self._chunk_seed(world_seed, self.cx, self.cz))
         cs = self.chunk_size
         cell_size = cs / self.CELL_GRID
+
+        # Skip object placement for terrain-only chunks (distant mountains).
+        # Use a coarser grid (3×3 instead of 6×6) since fine detail isn't
+        # visible at long range — reduces face count by 75%.
+        if self.terrain_only:
+            self.face_data.extend(
+                make_terrain_grid(self.cx, self.cz, cs, world_seed,
+                                  grid_res=3))
+            return
 
         # Place objects in each cell
         for gi in range(self.CELL_GRID):
@@ -699,18 +873,28 @@ class ForestChunk:
                 # Random rotation
                 angle = rng.random() * math.pi * 2
 
+                # Terrain height at object position
+                by = terrain_height(wx, wz, world_seed)
+
                 if obj_type == 'tree':
                     height = 1.8 + rng.random() * 1.5   # 1.8–3.3
                     self.face_data.extend(
-                        make_pine_tree(wx, wz, height, angle, rng))
+                        make_pine_tree(wx, wz, height, angle, rng,
+                                       base_y=by))
                 elif obj_type == 'rock':
                     scale = 0.25 + rng.random() * 0.4   # 0.25–0.65
                     self.face_data.extend(
-                        make_rock(wx, wz, scale, angle, rng))
+                        make_rock(wx, wz, scale, angle, rng,
+                                  base_y=by))
                 elif obj_type == 'bush':
                     scale = 0.4 + rng.random() * 0.3    # 0.4–0.7
                     self.face_data.extend(
-                        make_bush(wx, wz, scale, angle, rng))
+                        make_bush(wx, wz, scale, angle, rng,
+                                  base_y=by))
+
+        # Generate terrain wireframe grid
+        self.face_data.extend(
+            make_terrain_grid(self.cx, self.cz, cs, world_seed))
 
 
 # ---------------------------------------------------------------------------
@@ -733,11 +917,18 @@ class ForestWorld:
         self._cam_forward = Vec3(0, 0, -1)
         self._cam_pos = Vec3(0, 0, 0)
         self._last_face_count = 0       # for status-bar diagnostics
+        self._last_mtn_chunks = 0       # mountain chunks loaded (diagnostics)
+        self._mtn_cache: dict = {}      # (cx, cz) → bool — mountain noise cache
 
     # -- chunk loading / unloading ------------------------------------------
 
     def update(self, camera: 'Camera'):
-        """Load / unload chunks based on camera position."""
+        """Load / unload chunks based on camera position.
+
+        In addition to the normal render-distance loading, chunks that contain
+        mountain terrain are loaded at an extended range (terrain-only, no
+        objects) so that mountain silhouettes are visible from far away.
+        """
         self._cam_pos = camera.position
         self._cam_forward = camera.forward
 
@@ -746,25 +937,62 @@ class ForestWorld:
         cam_cz = int(math.floor(camera.position.z / cs))
         rd = self.render_distance
 
-        # Determine which chunks should be loaded
+        # ── normal chunks (full detail) ───────────────────────────────────
         needed = set()
         for dx in range(-rd, rd + 1):
             for dz in range(-rd, rd + 1):
                 needed.add((cam_cx + dx, cam_cz + dz))
 
-        # Unload chunks that are too far
-        to_remove = [k for k in self.chunks if k not in needed]
+        # ── extended mountain chunks (terrain wireframe only) ─────────────
+        # Scan a much wider radius; only load chunks that contain mountain
+        # noise so their silhouettes are visible from far away.
+        mtn_rd = max(16, rd * 3)
+        mtn_needed = set()
+        mtn_cache = self._mtn_cache
+        for dx in range(-mtn_rd, mtn_rd + 1):
+            for dz in range(-mtn_rd, mtn_rd + 1):
+                key = (cam_cx + dx, cam_cz + dz)
+                if key in needed:
+                    continue        # already loaded at full detail
+                if key not in mtn_cache:
+                    mtn_cache[key] = chunk_has_mountain(
+                        key[0], key[1], cs, self.seed)
+                if mtn_cache[key]:
+                    mtn_needed.add(key)
+        self._last_mtn_chunks = len(mtn_needed)
+
+        all_needed = needed | mtn_needed
+
+        # Unload chunks that are no longer in either set
+        to_remove = [k for k in self.chunks if k not in all_needed]
         for k in to_remove:
             del self.chunks[k]
 
-        # Load new chunks (limit to 2 per frame to avoid stutter)
+        # Load new chunks (limit per frame to avoid stutter; higher when
+        # render distance is large, e.g. viewing from a mountaintop)
+        max_load = 2 if rd <= 3 else 4
         loaded = 0
+
+        # Prioritise normal full-detail chunks
         for key in needed:
             if key not in self.chunks:
                 self.chunks[key] = ForestChunk(
                     key[0], key[1], cs, self.seed)
                 loaded += 1
-                if loaded >= 2:
+                if loaded >= max_load:
+                    break
+
+        # Then load distant mountain chunks (terrain-only).
+        # These are much cheaper to generate (no objects), so allow a
+        # higher per-frame budget so mountains appear quickly.
+        mtn_loaded = 0
+        mtn_max = 8
+        for key in mtn_needed:
+            if key not in self.chunks:
+                self.chunks[key] = ForestChunk(
+                    key[0], key[1], cs, self.seed, terrain_only=True)
+                mtn_loaded += 1
+                if mtn_loaded >= mtn_max:
                     break
 
     # -- face data for the renderer -----------------------------------------
@@ -772,8 +1000,11 @@ class ForestWorld:
     def get_face_data(self) -> list:
         """Return face data for all visible chunks.
 
-        Applies behind-camera culling: chunks whose centre is behind the
-        camera (with a margin for chunk size) are skipped entirely.
+        Applies two culling passes:
+          1. Behind-camera: chunks whose centre is behind the camera are
+             skipped entirely (generous margin for chunk size).
+          2. Distance: terrain-only (distant mountain) chunks beyond a max
+             render distance are skipped to avoid sub-pixel wireframe work.
         """
         result = []
         cs = self.chunk_size
@@ -781,6 +1012,10 @@ class ForestWorld:
         cam_pz = self._cam_pos.z
         fwd_x = self._cam_forward.x
         fwd_z = self._cam_forward.z
+        # Mountain chunks beyond this distance² are culled from rendering
+        # (they're loaded for pop-in prevention but too far for wireframe)
+        mtn_render_dist = cs * 10.0     # ~120 world units
+        mtn_dist_sq = mtn_render_dist * mtn_render_dist
 
         for (cx, cz), chunk in self.chunks.items():
             # Chunk centre in world space
@@ -797,6 +1032,11 @@ class ForestWorld:
             # Skip chunks entirely behind camera (generous margin)
             if dot_fwd < -cs * 1.5:
                 continue
+
+            # Terrain-only mountain chunks: cull if too far for wireframe
+            if chunk.terrain_only:
+                if dx * dx + dz * dz > mtn_dist_sq:
+                    continue
 
             result.extend(chunk.face_data)
 
@@ -1089,9 +1329,19 @@ class Renderer:
                                           self.light_pos.z)
 
         # Gather visible faces ───────────────────────────────────────────
+        # Each entry: (cam_vs, cam_n, wireframe_str | None, world_center_y)
         visible = []
 
-        for vs, center, normal in model.get_face_data():
+        for item in model.get_face_data():
+            vs = item[0]
+            center = item[1]
+            normal = item[2]
+            # 4th element = wireframe edge string (terrain grid etc.)
+            wireframe = item[3] if len(item) > 3 else None
+
+            # World-space centre Y — used for height-based fog attenuation
+            world_y = center.y
+
             # Transform vertices to camera space
             cam_vs = [camera.view_transform(v.x, v.y, v.z) for v in vs]
 
@@ -1106,45 +1356,87 @@ class Renderer:
 
             cam_n = camera.transform_direction(
                 normal.x, normal.y, normal.z)
-            visible.append((clipped, cam_n))
+            visible.append((clipped, cam_n, wireframe, world_y))
 
         # Draw ────────────────────────────────────────────────────────────
         buffer = [[' '] * self.width for _ in range(self.height)]
         zbuffer = [[-1e30] * self.width for _ in range(self.height)]
 
-        # Filled faces
-        for cam_vs, cam_n in visible:
+        # Filled faces (skip wireframe-only faces)
+        for cam_vs, cam_n, wireframe, world_y in visible:
+            if wireframe is not None:
+                continue
             projected = [self._project_vertex_persp(cv) for cv in cam_vs]
             if all(projected):
                 self._draw_face_lit_persp(buffer, zbuffer, projected,
-                                          cam_vs[0], cam_n, light_cam)
+                                          cam_vs[0], cam_n, light_cam,
+                                          world_y)
 
-        # Edges (with small z-bias so they sit in front of their face)
-        if self.draw_edges:
-            fog_dist = self.fog_distance
-            for cam_vs, cam_n in visible:
-                # Skip edges on distant faces when fog is active
-                if fog_dist > 0:
-                    avg_z = sum(v[2] for v in cam_vs) / len(cam_vs)
-                    if avg_z > fog_dist * 0.6:
-                        continue
-                projected = [self._project_vertex_persp(cv) for cv in cam_vs]
-                if all(projected):
-                    nv = len(projected)
-                    for i in range(nv):
-                        j = (i + 1) % nv
-                        # z-buffer depth = -cam_z  (higher = closer)
-                        self._draw_line(buffer, zbuffer,
-                                        projected[i], projected[j],
-                                        -cam_vs[i][2], -cam_vs[j][2],
-                                        self.EDGE_STR, z_bias=0.005)
+        # Edges — always draw wireframe faces; filled-face edges if draw_edges.
+        # Edge colours are faded toward black with distance (matching the
+        # fill-pass fog) so that distant geometry gradually disappears.
+        fog_dist = self.fog_distance
+        for cam_vs, cam_n, wireframe, world_y in visible:
+            # Skip filled-face edges unless draw_edges is set
+            if wireframe is None and not self.draw_edges:
+                continue
+
+            # Compute distance-based fog fade for edge colours
+            if fog_dist > 0:
+                avg_z = sum(v[2] for v in cam_vs) / len(cam_vs)
+                fog = min(1.0, avg_z / fog_dist)
+
+                # Height-based fog reduction for terrain wireframe only —
+                # mountain silhouettes stay visible at extended range.
+                if wireframe is not None and world_y > 4.0:
+                    alt = min(1.0, (world_y - 4.0) / 15.0)
+                    fog_eff = fog * (1.0 - alt * 0.92)
+                else:
+                    fog_eff = fog
+
+                fog_fade = max(0.0, 1.0 - fog_eff * fog_eff)  # quadratic
+                if fog_fade < 0.03:
+                    continue                    # fully fogged — skip
+            else:
+                fog_fade = 1.0
+
+            projected = [self._project_vertex_persp(cv) for cv in cam_vs]
+            if all(projected):
+                # Generate fog-faded edge colour
+                if wireframe is not None:
+                    # Terrain wireframe — sage green faded by fog
+                    r = int(60 * fog_fade)
+                    g = int(90 * fog_fade)
+                    b = int(45 * fog_fade)
+                    edge_str = f'\033[38;2;{r};{g};{b}m.\033[0m'
+                else:
+                    # Object edges — bright green faded by fog
+                    r = int(159 * fog_fade)
+                    g = int(239 * fog_fade)
+                    edge_str = f'\033[38;2;{r};{g};0m#\033[0m'
+
+                # Wireframe faces use z_bias=0 so objects occlude them
+                z_bias = 0.0 if wireframe is not None else 0.005
+                nv = len(projected)
+                for i in range(nv):
+                    j = (i + 1) % nv
+                    # z-buffer depth = -cam_z  (higher = closer)
+                    self._draw_line(buffer, zbuffer,
+                                    projected[i], projected[j],
+                                    -cam_vs[i][2], -cam_vs[j][2],
+                                    edge_str, z_bias=z_bias)
         return buffer
 
     def _draw_face_lit_persp(self, buffer, zbuffer, projected,
-                             cam_v0, cam_normal, light_cam):
+                             cam_v0, cam_normal, light_cam,
+                             world_y=0.0):
         """Fill a convex polygon with perspective-correct z-buffered lighting.
 
         All coordinates are in **camera space**.
+
+        *world_y* is the world-space centre Y of the face — used to reduce
+        fog for high-altitude geometry so that mountains remain visible from
+        far away (they rise above the fog layer).
 
         Depth is stored as ``-cam_z`` so that the existing z-buffer convention
         (higher value = closer) is preserved.
@@ -1174,6 +1466,12 @@ class Renderer:
         n_verts = len(projected)
         near = self.near_plane
         fog_dist = self.fog_distance
+
+        # Filled faces (trees, rocks, bushes) use normal fog regardless of
+        # altitude — only terrain wireframe edges get height-based fog
+        # reduction (handled in the edge pass).  This prevents distant
+        # objects on mountain slopes from drowning out the mountain terrain.
+        fog_height_factor = 1.0
 
         for y in range(ymin, ymax + 1):
             ry = -(y - scy) * char_aspect * inv_focal
@@ -1214,9 +1512,9 @@ class Renderer:
                     else:
                         brightness = 1.0
 
-                    # Distance fog: fade brightness toward zero
+                    # Distance fog with altitude attenuation
                     if fog_dist > 0:
-                        fog = min(1.0, cam_z / fog_dist)
+                        fog = min(1.0, cam_z / fog_dist) * fog_height_factor
                         brightness *= (1.0 - fog * fog)  # quadratic fade
 
                     idx = int(brightness * num_shades)
@@ -1301,16 +1599,16 @@ class SpinningModel:
 
         if self.forest_mode:
             # Forest mode — infinite procedural world
+            self._base_render_dist = getattr(args, 'render_dist', 2)
             self.world = ForestWorld(
                 seed=getattr(args, 'seed', 42),
                 chunk_size=12.0,
-                render_distance=getattr(args, 'render_dist', 2),
+                render_distance=self._base_render_dist,
             )
             self.model = None
             self.renderer = Renderer(args.width, args.height)
             self.renderer.set_fov(getattr(args, 'fov', 90.0))
-            rd = getattr(args, 'render_dist', 2)
-            self.renderer.fog_distance = 12.0 * rd   # chunk_size * render_distance
+            self.renderer.fog_distance = 12.0 * self._base_render_dist
             self.mode = 'move'
 
             # Camera at eye level
@@ -1409,9 +1707,21 @@ class SpinningModel:
     def update(self):
         self._handle_input()
         if self.forest_mode:
+            # Track terrain height — camera walks over hills and valleys
+            cp = self.camera.position
+            ty = terrain_height(cp.x, cp.z, self.world.seed)
+            cp.y = ty + 1.5          # eye height above terrain surface
+
+            # Dynamic render distance — see further from mountaintops
+            base_rd = self._base_render_dist
+            extra_rd = min(4, int(cp.y / 4.0))
+            effective_rd = base_rd + max(0, extra_rd)
+            if effective_rd != self.world.render_distance:
+                self.world.render_distance = effective_rd
+                self.renderer.fog_distance = 12.0 * effective_rd
+
             self.world.update(self.camera)
             # Move light with camera for consistent forest illumination
-            cp = self.camera.position
             self.renderer.light_pos = Vec3(cp.x + 5, cp.y + 20, cp.z + 5)
         elif self.mode == 'rotate':
             self.model.rotate(
@@ -1432,12 +1742,14 @@ class SpinningModel:
         if self.forest_mode:
             fc = self.world._last_face_count
             nc = len(self.world.chunks)
+            mc = self.world._last_mtn_chunks
             px = self.camera.position.x
+            py = self.camera.position.y
             pz = self.camera.position.z
             status = (f"\033[7m FOREST \033[0m "
                       f"WASD=move Arrows=turn E/C=pitch "
-                      f"Chunks:{nc} Faces:{fc} "
-                      f"Pos:({px:.0f},{pz:.0f}) Q=quit")
+                      f"Chunks:{nc}(mtn:{mc}) Faces:{fc} "
+                      f"Pos:({px:.0f},{py:.1f},{pz:.0f}) Q=quit")
         elif self.mode == 'move':
             status = ("\033[7m MOVE \033[0m "
                       "WASD=move Arrows=turn R/F=up/dn E/C=pitch "
