@@ -14,6 +14,11 @@ Movement-mode controls:
   R / Space       Move up             F               Move down
   E               Pitch up            C               Pitch down
   Tab             Switch to SPIN      Q / Ctrl-C      Quit
+
+Forest mode (--forest):
+  Procedurally generated infinite forest with trees, rocks, and bushes.
+  Uses chunk-based streaming — new terrain loads as you walk.
+  Navigate with WASD + arrow keys.  Seed controls the world layout.
 """
 
 import sys
@@ -22,6 +27,7 @@ import math
 import argparse
 import os
 import signal
+import random
 
 # Non-blocking keyboard input (Unix only)
 try:
@@ -432,6 +438,379 @@ class HouseScene(Model):
 
 
 # ---------------------------------------------------------------------------
+# Forest model primitives — factory functions returning pre-computed face data
+# ---------------------------------------------------------------------------
+
+def _make_face(verts, reverse=False):
+    """Build a (verts, center, normal) tuple from a list of Vec3 vertices.
+
+    Uses e2×e1 (last_edge × first_edge from v0) for outward normal,
+    matching Model.get_face_data() convention.
+    """
+    vs = list(reversed(verts)) if reverse else list(verts)
+    n = len(vs)
+    center = Vec3(
+        sum(v.x for v in vs) / n,
+        sum(v.y for v in vs) / n,
+        sum(v.z for v in vs) / n,
+    )
+    e1 = Vec3(vs[1].x - vs[0].x, vs[1].y - vs[0].y, vs[1].z - vs[0].z)
+    e2 = Vec3(vs[-1].x - vs[0].x, vs[-1].y - vs[0].y, vs[-1].z - vs[0].z)
+    normal = Vec3(
+        e2.y * e1.z - e2.z * e1.y,
+        e2.z * e1.x - e2.x * e1.z,
+        e2.x * e1.y - e2.y * e1.x,
+    ).normalize()
+    return (vs, center, normal)
+
+
+def _rotate_y(lx, lz, cos_a, sin_a):
+    """Rotate a point around the Y axis by a pre-computed cos/sin pair."""
+    return lx * cos_a + lz * sin_a, -lx * sin_a + lz * cos_a
+
+
+def make_pine_tree(wx, wz, height, angle, rng):
+    """Generate face data for a multi-tier pine tree at world position (wx, 0, wz).
+
+    Returns a list of (verts, center, normal) tuples.
+
+    Geometry: 4-quad trunk + 3 stacked pyramid tiers (4 tri faces each) = 16 faces.
+    The layered canopy creates a recognisable spruce/pine silhouette.
+
+    ::
+
+             /\\
+            /  \\          ← Tier 3 (smallest)
+           /----\\
+          /      \\        ← Tier 2 (medium)
+         /--------\\
+        /          \\      ← Tier 1 (largest)
+       /------------\\
+            ||             ← Trunk
+            ||
+    """
+    faces = []
+    ca, sa = math.cos(angle), math.sin(angle)
+
+    # Trunk dimensions
+    tw = 0.10                   # trunk half-width
+    th = height * 0.40          # trunk height (shorter to leave room for 3 tiers)
+
+    # Trunk: 4 vertical side quads
+    trunk_verts = []
+    for lx, lz in [(-tw, -tw), (tw, -tw), (tw, tw), (-tw, tw)]:
+        rx, rz = _rotate_y(lx, lz, ca, sa)
+        trunk_verts.append((
+            Vec3(wx + rx, 0, wz + rz),
+            Vec3(wx + rx, th, wz + rz),
+        ))
+
+    for i in range(4):
+        j = (i + 1) % 4
+        b0, t0 = trunk_verts[i]
+        b1, t1 = trunk_verts[j]
+        faces.append(_make_face([b0, b1, t1, t0]))
+
+    # 3 stacked canopy tiers — each is a pyramid, progressively smaller
+    canopy_start = th * 0.70     # canopy begins below trunk top (overlap)
+    canopy_height = height - canopy_start
+    tier_count = 3
+    tier_h = canopy_height / tier_count
+
+    for t in range(tier_count):
+        # Each tier: base at tier_base_y, apex at tier_apex_y
+        tier_base_y = canopy_start + t * tier_h * 0.65  # overlap successive tiers
+        tier_apex_y = canopy_start + (t + 1) * tier_h + t * tier_h * 0.05
+
+        # Tier radius shrinks with height (wider at bottom, narrower at top)
+        progress = t / tier_count   # 0 = bottom tier, 1 = top
+        tier_radius = height * (0.38 - 0.10 * progress)
+
+        apex = Vec3(wx, tier_apex_y, wz)
+        tier_base = []
+        for lx, lz in [(-tier_radius, -tier_radius),
+                        (tier_radius, -tier_radius),
+                        (tier_radius, tier_radius),
+                        (-tier_radius, tier_radius)]:
+            rx, rz = _rotate_y(lx, lz, ca, sa)
+            tier_base.append(Vec3(wx + rx, tier_base_y, wz + rz))
+
+        for i in range(4):
+            j = (i + 1) % 4
+            faces.append(_make_face([tier_base[i], tier_base[j], apex]))
+
+    return faces
+
+
+def make_rock(wx, wz, scale, angle, rng):
+    """Generate face data for an irregular rock at world position (wx, 0, wz).
+
+    Geometry: irregular tetrahedron = 4 triangular faces.
+    """
+    faces = []
+    ca, sa = math.cos(angle), math.sin(angle)
+
+    rh = scale * (0.3 + rng.random() * 0.3)
+    rw = scale * 0.5
+
+    # Irregular tetrahedron with slightly off-centre apex
+    offx = scale * (rng.random() - 0.5) * 0.3
+    offz = scale * (rng.random() - 0.5) * 0.3
+
+    pts_local = [
+        (-rw, 0, -rw * 0.7),
+        (rw, 0, -rw * 0.5),
+        (rw * 0.3, 0, rw),
+        (offx, rh, offz),
+    ]
+
+    pts = []
+    for lx, ly, lz in pts_local:
+        rx, rz = _rotate_y(lx, lz, ca, sa)
+        pts.append(Vec3(wx + rx, ly, wz + rz))
+
+    faces.append(_make_face([pts[0], pts[1], pts[3]]))
+    faces.append(_make_face([pts[1], pts[2], pts[3]]))
+    faces.append(_make_face([pts[2], pts[0], pts[3]]))
+    faces.append(_make_face([pts[0], pts[2], pts[1]]))   # bottom
+    return faces
+
+
+def make_bush(wx, wz, scale, angle, rng):
+    """Generate face data for a bush at world position (wx, 0, wz).
+
+    Geometry: low pyramid = 4 triangular faces.
+    """
+    faces = []
+    ca, sa = math.cos(angle), math.sin(angle)
+
+    bw = scale * 0.4           # base half-width
+    bh = scale * 0.35          # height
+    apex = Vec3(wx, bh, wz)
+
+    base = []
+    for lx, lz in [(-bw, -bw), (bw, -bw), (bw, bw), (-bw, bw)]:
+        rx, rz = _rotate_y(lx, lz, ca, sa)
+        base.append(Vec3(wx + rx, 0, wz + rz))
+
+    for i in range(4):
+        j = (i + 1) % 4
+        faces.append(_make_face([base[i], base[j], apex]))
+
+    return faces
+
+
+def make_ground_quad(cx, cz, chunk_size):
+    """Generate face data for a ground quad covering chunk (cx, cz).
+
+    Returns 2 faces (top + bottom) so the ground is visible from both sides.
+    """
+    x0 = cx * chunk_size
+    z0 = cz * chunk_size
+    x1 = x0 + chunk_size
+    z1 = z0 + chunk_size
+    y = -0.02                   # slightly below y=0 to avoid z-fighting
+
+    v0 = Vec3(x0, y, z0)
+    v1 = Vec3(x1, y, z0)
+    v2 = Vec3(x1, y, z1)
+    v3 = Vec3(x0, y, z1)
+
+    return [
+        _make_face([v0, v1, v2, v3]),       # top    (normal +y)
+        _make_face([v3, v2, v1, v0]),       # bottom (normal −y)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# ForestChunk — a single chunk of procedurally generated forest
+# ---------------------------------------------------------------------------
+
+class ForestChunk:
+    """A square region of forest with procedurally placed objects.
+
+    Each chunk is divided into a CELL_GRID × CELL_GRID sub-grid.  Each cell
+    may contain one object chosen by weighted random selection.  The RNG is
+    seeded deterministically from the world seed and chunk coordinates, so
+    revisiting a location regenerates the identical layout.
+    """
+
+    CELL_GRID = 4               # 4×4 = 16 cells per chunk
+
+    # Object type weights (cumulative selection)
+    OBJ_WEIGHTS = [
+        ('tree',  0.30),
+        ('rock',  0.20),
+        ('bush',  0.25),
+        ('empty', 0.25),
+    ]
+
+    def __init__(self, cx: int, cz: int, chunk_size: float,
+                 world_seed: int):
+        self.cx = cx
+        self.cz = cz
+        self.chunk_size = chunk_size
+        self.face_data: list = []
+        self._generate(world_seed)
+
+    # -- seeded generation ---------------------------------------------------
+
+    @staticmethod
+    def _chunk_seed(world_seed: int, cx: int, cz: int) -> int:
+        h = world_seed & 0xFFFFFFFF
+        h = ((h * 1103515245 + 12345)
+             ^ ((cx * 73856093) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        h = ((h * 1103515245 + 12345)
+             ^ ((cz * 19349663) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        return h
+
+    def _generate(self, world_seed: int):
+        rng = random.Random(
+            self._chunk_seed(world_seed, self.cx, self.cz))
+        cs = self.chunk_size
+        cell_size = cs / self.CELL_GRID
+
+        # Place objects in each cell
+        for gi in range(self.CELL_GRID):
+            for gj in range(self.CELL_GRID):
+                # Cell centre in world space
+                cell_cx = self.cx * cs + (gi + 0.5) * cell_size
+                cell_cz = self.cz * cs + (gj + 0.5) * cell_size
+
+                # Weighted random object type
+                roll = rng.random()
+                cumulative = 0.0
+                obj_type = 'empty'
+                for otype, weight in self.OBJ_WEIGHTS:
+                    cumulative += weight
+                    if roll < cumulative:
+                        obj_type = otype
+                        break
+
+                if obj_type == 'empty':
+                    continue
+
+                # Jitter position within cell
+                jx = (rng.random() - 0.5) * cell_size * 0.7
+                jz = (rng.random() - 0.5) * cell_size * 0.7
+                wx = cell_cx + jx
+                wz = cell_cz + jz
+
+                # Random rotation
+                angle = rng.random() * math.pi * 2
+
+                if obj_type == 'tree':
+                    height = 1.8 + rng.random() * 1.5   # 1.8–3.3
+                    self.face_data.extend(
+                        make_pine_tree(wx, wz, height, angle, rng))
+                elif obj_type == 'rock':
+                    scale = 0.25 + rng.random() * 0.4   # 0.25–0.65
+                    self.face_data.extend(
+                        make_rock(wx, wz, scale, angle, rng))
+                elif obj_type == 'bush':
+                    scale = 0.4 + rng.random() * 0.3    # 0.4–0.7
+                    self.face_data.extend(
+                        make_bush(wx, wz, scale, angle, rng))
+
+
+# ---------------------------------------------------------------------------
+# ForestWorld — infinite procedural forest with chunk streaming
+# ---------------------------------------------------------------------------
+
+class ForestWorld:
+    """Manages an infinite procedural forest via chunk-based streaming.
+
+    Implements ``get_face_data()`` compatible with the Renderer, so it can
+    be passed in place of a ``Model``.
+    """
+
+    def __init__(self, seed: int = 42, chunk_size: float = 12.0,
+                 render_distance: int = 2):
+        self.seed = seed
+        self.chunk_size = chunk_size
+        self.render_distance = render_distance
+        self.chunks: dict = {}          # (cx, cz) → ForestChunk
+        self._cam_forward = Vec3(0, 0, -1)
+        self._cam_pos = Vec3(0, 0, 0)
+        self._last_face_count = 0       # for status-bar diagnostics
+
+    # -- chunk loading / unloading ------------------------------------------
+
+    def update(self, camera: 'Camera'):
+        """Load / unload chunks based on camera position."""
+        self._cam_pos = camera.position
+        self._cam_forward = camera.forward
+
+        cs = self.chunk_size
+        cam_cx = int(math.floor(camera.position.x / cs))
+        cam_cz = int(math.floor(camera.position.z / cs))
+        rd = self.render_distance
+
+        # Determine which chunks should be loaded
+        needed = set()
+        for dx in range(-rd, rd + 1):
+            for dz in range(-rd, rd + 1):
+                needed.add((cam_cx + dx, cam_cz + dz))
+
+        # Unload chunks that are too far
+        to_remove = [k for k in self.chunks if k not in needed]
+        for k in to_remove:
+            del self.chunks[k]
+
+        # Load new chunks (limit to 2 per frame to avoid stutter)
+        loaded = 0
+        for key in needed:
+            if key not in self.chunks:
+                self.chunks[key] = ForestChunk(
+                    key[0], key[1], cs, self.seed)
+                loaded += 1
+                if loaded >= 2:
+                    break
+
+    # -- face data for the renderer -----------------------------------------
+
+    def get_face_data(self) -> list:
+        """Return face data for all visible chunks.
+
+        Applies behind-camera culling: chunks whose centre is behind the
+        camera (with a margin for chunk size) are skipped entirely.
+        """
+        result = []
+        cs = self.chunk_size
+        cam_px = self._cam_pos.x
+        cam_pz = self._cam_pos.z
+        fwd_x = self._cam_forward.x
+        fwd_z = self._cam_forward.z
+
+        for (cx, cz), chunk in self.chunks.items():
+            # Chunk centre in world space
+            ccx = cx * cs + cs * 0.5
+            ccz = cz * cs + cs * 0.5
+
+            # Vector from camera to chunk centre
+            dx = ccx - cam_px
+            dz = ccz - cam_pz
+
+            # Dot product with camera forward (XZ only)
+            dot_fwd = dx * fwd_x + dz * fwd_z
+
+            # Skip chunks entirely behind camera (generous margin)
+            if dot_fwd < -cs * 1.5:
+                continue
+
+            result.extend(chunk.face_data)
+
+        self._last_face_count = len(result)
+        return result
+
+    # -- compatibility shims ------------------------------------------------
+
+    def bounding_radius(self) -> float:
+        """Dummy bounding radius for Renderer auto-fit compatibility."""
+        return self.chunk_size * self.render_distance
+
+
+# ---------------------------------------------------------------------------
 # Non-blocking keyboard input
 # ---------------------------------------------------------------------------
 
@@ -503,19 +882,24 @@ class Renderer:
     CHAR_ASPECT = 2.0
     EDGE_STR = '\033[38;2;159;239;0m#\033[0m'
 
-    def __init__(self, width: int, height: int, model: Model):
+    def __init__(self, width: int, height: int, model=None):
         self.width = width
         self.height = height
         # Auto-fit: scale so the model's bounding sphere fits the viewport
-        max_extent = model.bounding_radius()
-        self.scale = min(
-            (width // 2 - 1) / max_extent,
-            (height // 2 - 1) * self.CHAR_ASPECT / max_extent,
-        )
+        if model is not None:
+            max_extent = model.bounding_radius()
+            self.scale = min(
+                (width // 2 - 1) / max_extent,
+                (height // 2 - 1) * self.CHAR_ASPECT / max_extent,
+            )
+        else:
+            self.scale = 1.0
         # Perspective parameters (for movement mode)
         self.near_plane = 0.01
         self._fov_deg = 90.0              # default; overridden by set_fov()
         self.focal = width * 0.8          # recalculated by set_fov()
+        self.draw_edges = True            # toggle wireframe edges
+        self.fog_distance = 0.0           # 0 = no fog; >0 = fade starts here
 
     def set_fov(self, fov_degrees: float):
         """Set the horizontal field of view (degrees) for perspective mode."""
@@ -736,17 +1120,24 @@ class Renderer:
                                           cam_vs[0], cam_n, light_cam)
 
         # Edges (with small z-bias so they sit in front of their face)
-        for cam_vs, cam_n in visible:
-            projected = [self._project_vertex_persp(cv) for cv in cam_vs]
-            if all(projected):
-                nv = len(projected)
-                for i in range(nv):
-                    j = (i + 1) % nv
-                    # z-buffer depth = -cam_z  (higher = closer)
-                    self._draw_line(buffer, zbuffer,
-                                    projected[i], projected[j],
-                                    -cam_vs[i][2], -cam_vs[j][2],
-                                    self.EDGE_STR, z_bias=0.005)
+        if self.draw_edges:
+            fog_dist = self.fog_distance
+            for cam_vs, cam_n in visible:
+                # Skip edges on distant faces when fog is active
+                if fog_dist > 0:
+                    avg_z = sum(v[2] for v in cam_vs) / len(cam_vs)
+                    if avg_z > fog_dist * 0.6:
+                        continue
+                projected = [self._project_vertex_persp(cv) for cv in cam_vs]
+                if all(projected):
+                    nv = len(projected)
+                    for i in range(nv):
+                        j = (i + 1) % nv
+                        # z-buffer depth = -cam_z  (higher = closer)
+                        self._draw_line(buffer, zbuffer,
+                                        projected[i], projected[j],
+                                        -cam_vs[i][2], -cam_vs[j][2],
+                                        self.EDGE_STR, z_bias=0.005)
         return buffer
 
     def _draw_face_lit_persp(self, buffer, zbuffer, projected,
@@ -782,6 +1173,7 @@ class Renderer:
         _sqrt = math.sqrt
         n_verts = len(projected)
         near = self.near_plane
+        fog_dist = self.fog_distance
 
         for y in range(ymin, ymax + 1):
             ry = -(y - scy) * char_aspect * inv_focal
@@ -822,7 +1214,14 @@ class Renderer:
                     else:
                         brightness = 1.0
 
+                    # Distance fog: fade brightness toward zero
+                    if fog_dist > 0:
+                        fog = min(1.0, cam_z / fog_dist)
+                        brightness *= (1.0 - fog * fog)  # quadratic fade
+
                     idx = int(brightness * num_shades)
+                    if idx <= 0 and fog_dist > 0:
+                        continue  # fully fogged — leave as space
                     buffer[y][x] = shading[max(0, min(num_shades, idx))]
 
     # ── shared helpers ─────────────────────────────────────────────────────
@@ -896,21 +1295,45 @@ class SpinningModel:
 
     def __init__(self, args):
         self.args = args
-        model_cls = MODELS[args.model]
-        self.model = model_cls(args.size)
-        self.renderer = Renderer(args.width, args.height, self.model)
-        self.renderer.set_fov(getattr(args, 'fov', 90.0))
+        self.forest_mode = getattr(args, 'forest', False)
         self.running = True
-        self.mode = 'move' if getattr(args, 'move', False) else 'rotate'
         self.keyboard = None
 
-        # Camera for movement mode — start far enough back to see the model
-        radius = self.model.bounding_radius()
-        self.camera = Camera(position=Vec3(0.0, radius * 0.3, radius * 3.0))
+        if self.forest_mode:
+            # Forest mode — infinite procedural world
+            self.world = ForestWorld(
+                seed=getattr(args, 'seed', 42),
+                chunk_size=12.0,
+                render_distance=getattr(args, 'render_dist', 2),
+            )
+            self.model = None
+            self.renderer = Renderer(args.width, args.height)
+            self.renderer.set_fov(getattr(args, 'fov', 90.0))
+            rd = getattr(args, 'render_dist', 2)
+            self.renderer.fog_distance = 12.0 * rd   # chunk_size * render_distance
+            self.mode = 'move'
 
-        # Speeds (scale to model size for consistent feel)
-        self.move_speed = radius * 0.06
-        self.turn_speed = 0.05
+            # Camera at eye level
+            self.camera = Camera(position=Vec3(6.0, 1.5, 6.0))
+            self.move_speed = 0.15
+            self.turn_speed = 0.05
+        else:
+            # Static model mode (original behaviour)
+            model_cls = MODELS[args.model]
+            self.model = model_cls(args.size)
+            self.world = None
+            self.renderer = Renderer(args.width, args.height, self.model)
+            self.renderer.set_fov(getattr(args, 'fov', 90.0))
+            self.mode = 'move' if getattr(args, 'move', False) else 'rotate'
+
+            # Camera for movement mode — start far enough back to see the model
+            radius = self.model.bounding_radius()
+            self.camera = Camera(
+                position=Vec3(0.0, radius * 0.3, radius * 3.0))
+
+            # Speeds (scale to model size for consistent feel)
+            self.move_speed = radius * 0.06
+            self.turn_speed = 0.05
 
         # Key-state tracking for smooth held-key movement
         # (bridges the terminal typematic delay so holding a key moves
@@ -947,7 +1370,8 @@ class SpinningModel:
                 self.running = False
                 return
             if key in ('TAB', 'm', 'M'):
-                self.mode = 'move' if self.mode == 'rotate' else 'rotate'
+                if not self.forest_mode:
+                    self.mode = 'move' if self.mode == 'rotate' else 'rotate'
                 continue
             # Record timestamp for key-state tracking
             self._key_state[key] = now
@@ -984,7 +1408,12 @@ class SpinningModel:
 
     def update(self):
         self._handle_input()
-        if self.mode == 'rotate':
+        if self.forest_mode:
+            self.world.update(self.camera)
+            # Move light with camera for consistent forest illumination
+            cp = self.camera.position
+            self.renderer.light_pos = Vec3(cp.x + 5, cp.y + 20, cp.z + 5)
+        elif self.mode == 'rotate':
             self.model.rotate(
                 self.args.speed_x,
                 self.args.speed_y,
@@ -992,13 +1421,24 @@ class SpinningModel:
             )
 
     def render(self):
-        if self.mode == 'move':
+        if self.forest_mode:
+            buffer = self.renderer.render(self.world, camera=self.camera)
+        elif self.mode == 'move':
             buffer = self.renderer.render(self.model, camera=self.camera)
         else:
             buffer = self.renderer.render(self.model)
 
         # Build status bar
-        if self.mode == 'move':
+        if self.forest_mode:
+            fc = self.world._last_face_count
+            nc = len(self.world.chunks)
+            px = self.camera.position.x
+            pz = self.camera.position.z
+            status = (f"\033[7m FOREST \033[0m "
+                      f"WASD=move Arrows=turn E/C=pitch "
+                      f"Chunks:{nc} Faces:{fc} "
+                      f"Pos:({px:.0f},{pz:.0f}) Q=quit")
+        elif self.mode == 'move':
             status = ("\033[7m MOVE \033[0m "
                       "WASD=move Arrows=turn R/F=up/dn E/C=pitch "
                       "Tab=spin Q=quit")
@@ -1067,6 +1507,12 @@ def main():
                         help='Start in movement mode (free camera navigation)')
     parser.add_argument('--fov', type=float, default=90.0,
                         help='Horizontal field of view in degrees (default: 90)')
+    parser.add_argument('--forest', action='store_true',
+                        help='Start in infinite procedural forest mode')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='World seed for forest generation (default: 42)')
+    parser.add_argument('--render-dist', type=int, default=2,
+                        help='Chunk render distance for forest (default: 2)')
     parser.add_argument('--frame', '-fr', type=int, default=None,
                         help='Render a specific frame and exit')
 
