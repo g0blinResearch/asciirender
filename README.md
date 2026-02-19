@@ -2,6 +2,21 @@
 
 A zero-dependency Python CLI that renders spinning 3D models in the terminal using ASCII shading, per-pixel point-light illumination, and true-colour edge lines.
 
+## How This Code Was Generated
+
+**This entire project was written by AI, guided by a human developer through iterative prompt-feedback cycles using [Kilo Code](https://kilocode.ai) in VS Code.**
+
+The bulk of the development — planning, initial implementation, projection fixes, aspect ratio corrections, edge colouring, flicker reduction, multi-model support, and the rendering engine architecture — was done by a **locally-hosted [MiniMax-M2.5 (AWQ 4-bit)](https://huggingface.co/cyankiwi/MiniMax-M2.5-AWQ-4bit) model** running on a **2-node DGX Spark cluster** via [spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) (with an updated recipe from [Spark Arena](https://spark-arena.com/leaderboard), which also provides an LLM leaderboard for models running on the NVIDIA DGX Spark along with supporting usage instructions), across two sessions (433 tool exchanges, 23 completion cycles). The human developer guided the flow at every step: identifying visual bugs, requesting features, and steering the model through dozens of refinement cycles to get the rendering right.
+
+The project was then **finished off with [Claude Opus 4.6](https://www.anthropic.com/claude)**, which handled the final polish: distortion analysis, quaternion-based rotation, auto-fit scaling, a new per-pixel lighting system, additional models (car, house scene), occlusion/culling fixes, and documentation.
+
+| Phase | Model | Sessions | Steps | Tool Exchanges |
+|-------|-------|----------|-------|----------------|
+| Core development | Local MiniMax-M2.5 Cluster | 2 | 23 | 433 |
+| Analysis & polish | Opus 2.6 | 1 | 18 | 89 |
+
+📋 **[Full prompt history →](prompt_history.md)** — every user prompt and assistant completion, extracted from the raw task logs.
+
 ## Requirements
 
 - Python 3.6+
@@ -61,7 +76,7 @@ python3 run.py -m house
 | `--rotate-z` | | off | Enable Z-axis rotation |
 | `--frame` | `-fr` | — | Render a single frame number and exit |
 
-## Examples
+## Usage Examples
 
 ```bash
 # Default spinning cube
@@ -124,9 +139,11 @@ run.py
 
 ```
 m25test/
-├── run.py      # All code — models, renderer, CLI
-├── README.md   # This file
-└── PLAN.md     # Original project plan
+├── run.py               # All code — models, renderer, CLI
+├── extract_prompts.py   # Script to extract prompt history from task logs
+├── prompt_history.md    # Extracted prompt history (generated)
+├── README.md            # This file
+└── PLAN.md              # Original project plan
 ```
 
 ## Exit
