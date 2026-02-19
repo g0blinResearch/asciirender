@@ -2,6 +2,18 @@
 """
 ASCII 3D Spinning Models
 Renders rotating 3D models with ASCII shading in the terminal.
+
+Supports two modes toggled at runtime with Tab:
+  SPIN  — model auto-rotates (orthographic projection)
+  MOVE  — free camera navigation with perspective projection
+
+Movement-mode controls:
+  W / Up-arrow    Move forward        S / Down-arrow  Move backward
+  A               Strafe left         D               Strafe right
+  Left-arrow      Turn left           Right-arrow     Turn right
+  R / Space       Move up             F               Move down
+  E               Pitch up            C               Pitch down
+  Tab             Switch to SPIN      Q / Ctrl-C      Quit
 """
 
 import sys
@@ -10,6 +22,14 @@ import math
 import argparse
 import os
 import signal
+
+# Non-blocking keyboard input (Unix only)
+try:
+    import termios
+    import select
+    HAS_TERMIOS = True
+except ImportError:
+    HAS_TERMIOS = False
 
 
 class Vec3:
@@ -80,6 +100,79 @@ class Quaternion:
             v.x + qw * tx + (qy * tz - qz * ty),
             v.y + qw * ty + (qz * tx - qx * tz),
             v.z + qw * tz + (qx * ty - qy * tx),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Camera — first-person with yaw/pitch orientation
+# ---------------------------------------------------------------------------
+
+class Camera:
+    """First-person camera with position and yaw/pitch orientation.
+
+    Default orientation (yaw=0, pitch=0) looks toward −Z.
+
+    Camera space axes:
+      +X = right,  +Y = up,  cam_z = depth along the forward direction
+      (cam_z > 0 ⟹ in front of the camera)
+    """
+
+    def __init__(self, position: Vec3 = None, yaw: float = 0.0,
+                 pitch: float = 0.0):
+        self.position = position or Vec3(0.0, 0.0, 5.0)
+        self.yaw = yaw        # radians around world Y; 0 = facing −Z
+        self.pitch = pitch    # radians; positive = look upward
+        self._update_vectors()
+
+    # -- orientation vectors -------------------------------------------------
+
+    def _update_vectors(self):
+        cy, sy = math.cos(self.yaw), math.sin(self.yaw)
+        cp, sp = math.cos(self.pitch), math.sin(self.pitch)
+        self.forward = Vec3(sy * cp, sp, -cy * cp)
+        self.right   = Vec3(cy, 0.0, sy)
+        self.up      = Vec3(-sy * sp, cp, cy * sp)
+
+    # -- movement ------------------------------------------------------------
+
+    def move_forward(self, dist: float):
+        """Move along the *horizontal* forward direction (pitch ignored)."""
+        cy, sy = math.cos(self.yaw), math.sin(self.yaw)
+        self.position.x += sy * dist
+        self.position.z -= cy * dist
+
+    def move_right(self, dist: float):
+        self.position.x += self.right.x * dist
+        self.position.z += self.right.z * dist
+
+    def move_up(self, dist: float):
+        self.position.y += dist
+
+    def turn(self, dyaw: float, dpitch: float = 0.0):
+        self.yaw += dyaw
+        self.pitch = max(-1.3, min(1.3, self.pitch + dpitch))
+        self._update_vectors()
+
+    # -- transforms ----------------------------------------------------------
+
+    def view_transform(self, vx: float, vy: float, vz: float) -> tuple:
+        """World → camera space.  Returns (cam_x, cam_y, cam_z)."""
+        dx = vx - self.position.x
+        dy = vy - self.position.y
+        dz = vz - self.position.z
+        return (
+            self.right.x * dx + self.right.y * dy + self.right.z * dz,
+            self.up.x * dx    + self.up.y * dy    + self.up.z * dz,
+            self.forward.x * dx + self.forward.y * dy + self.forward.z * dz,
+        )
+
+    def transform_direction(self, nx: float, ny: float,
+                            nz: float) -> tuple:
+        """Rotate a direction from world space to camera space."""
+        return (
+            self.right.x * nx + self.right.y * ny + self.right.z * nz,
+            self.up.x * nx    + self.up.y * ny    + self.up.z * nz,
+            self.forward.x * nx + self.forward.y * ny + self.forward.z * nz,
         )
 
 
@@ -339,11 +432,72 @@ class HouseScene(Model):
 
 
 # ---------------------------------------------------------------------------
-# Renderer — supports any Model with 3- or 4-vertex faces
+# Non-blocking keyboard input
+# ---------------------------------------------------------------------------
+
+class KeyboardInput:
+    """Non-blocking keyboard input for Unix terminals (requires termios)."""
+
+    def __init__(self):
+        self.fd = sys.stdin.fileno()
+        self.old_settings = termios.tcgetattr(self.fd)
+        new = termios.tcgetattr(self.fd)
+        # Disable canonical mode and echo; keep signal generation (ISIG)
+        new[3] = new[3] & ~(termios.ICANON | termios.ECHO)
+        new[6][termios.VMIN] = 0
+        new[6][termios.VTIME] = 0
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, new)
+
+    def get_keys(self) -> list:
+        """Return a list of key names for all pending keypresses."""
+        keys = []
+        try:
+            while select.select([sys.stdin], [], [], 0)[0]:
+                ch = os.read(self.fd, 1)
+                if not ch:
+                    break
+                b = ch[0]
+                if b == 0x1B:  # ESC — possible arrow-key sequence
+                    if select.select([sys.stdin], [], [], 0.02)[0]:
+                        ch2 = os.read(self.fd, 1)
+                        if ch2 and ch2[0] == 0x5B:   # '['
+                            if select.select([sys.stdin], [], [], 0.02)[0]:
+                                ch3 = os.read(self.fd, 1)
+                                if ch3:
+                                    m = {65: 'UP', 66: 'DOWN',
+                                         67: 'RIGHT', 68: 'LEFT'}
+                                    if ch3[0] in m:
+                                        keys.append(m[ch3[0]])
+                                    continue
+                    keys.append('ESC')
+                elif b == 0x09:
+                    keys.append('TAB')
+                elif b == 0x20:
+                    keys.append('SPACE')
+                else:
+                    try:
+                        keys.append(ch.decode('utf-8'))
+                    except UnicodeDecodeError:
+                        pass
+        except (OSError, InterruptedError):
+            pass
+        return keys
+
+    def restore(self):
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+
+
+# ---------------------------------------------------------------------------
+# Renderer — supports orthographic (spin) and perspective (movement) modes
 # ---------------------------------------------------------------------------
 
 class Renderer:
-    """ASCII renderer for any 3D Model with per-pixel point-light shading."""
+    """ASCII renderer for any 3D Model with per-pixel point-light shading.
+
+    Two rendering paths:
+      • _render_ortho       — original orthographic projection (spin mode)
+      • _render_perspective  — perspective projection via Camera (move mode)
+    """
 
     SHADING = '.:-=+*%@'
     CHAR_ASPECT = 2.0
@@ -358,12 +512,34 @@ class Renderer:
             (width // 2 - 1) / max_extent,
             (height // 2 - 1) * self.CHAR_ASPECT / max_extent,
         )
+        # Perspective parameters (for movement mode)
+        self.near_plane = 0.01
+        self._fov_deg = 90.0              # default; overridden by set_fov()
+        self.focal = width * 0.8          # recalculated by set_fov()
+
+    def set_fov(self, fov_degrees: float):
+        """Set the horizontal field of view (degrees) for perspective mode."""
+        self._fov_deg = fov_degrees
+        half_fov_rad = math.radians(fov_degrees * 0.5)
+        self.focal = (self.width * 0.5) / math.tan(half_fov_rad)
         self.light_pos = Vec3(3.0, 4.0, 3.0)
         self.ambient = 0.12
 
-    # -- projection ---------------------------------------------------------
+    # ── public entry point ─────────────────────────────────────────────────
 
-    def _project_vertex(self, v: Vec3) -> tuple:
+    def render(self, model: Model, camera: 'Camera | None' = None) -> list:
+        """Render *model* into a 2-D char buffer.
+
+        If *camera* is ``None``, use the original orthographic path.
+        Otherwise use perspective projection through *camera*.
+        """
+        if camera is not None:
+            return self._render_perspective(model, camera)
+        return self._render_ortho(model)
+
+    # ── orthographic path (original) ───────────────────────────────────────
+
+    def _project_vertex_ortho(self, v: Vec3) -> 'tuple | None':
         """Orthographic projection → (screen_x, screen_y) or None."""
         x = round(v.x * self.scale + self.width // 2)
         y = round(-v.y * self.scale / self.CHAR_ASPECT + self.height // 2)
@@ -372,10 +548,8 @@ class Renderer:
             return (x, y)
         return None
 
-    # -- main render entry point --------------------------------------------
-
-    def render(self, model: Model) -> list:
-        """Render a Model into a 2-D character buffer with per-pixel z-buffering."""
+    def _render_ortho(self, model: Model) -> list:
+        """Render with orthographic projection (spin mode)."""
         visible = []
         for vs, center, normal in model.get_face_data():
             if normal.z > 0:
@@ -384,16 +558,14 @@ class Renderer:
         buffer = [[' '] * self.width for _ in range(self.height)]
         zbuffer = [[-1e30] * self.width for _ in range(self.height)]
 
-        # Fill faces (z-buffer handles occlusion per-pixel; no sorting needed)
         for vs, center, normal in visible:
-            projected = [self._project_vertex(v) for v in vs]
+            projected = [self._project_vertex_ortho(v) for v in vs]
             if all(projected):
-                self._draw_face_lit(buffer, zbuffer, projected, vs[0], normal)
+                self._draw_face_lit_ortho(buffer, zbuffer, projected,
+                                          vs[0], normal)
 
-        # Edges with z-buffer depth test (small bias so edges sit in front of
-        # their own face plane but behind genuinely closer geometry)
         for vs, center, normal in visible:
-            projected = [self._project_vertex(v) for v in vs]
+            projected = [self._project_vertex_ortho(v) for v in vs]
             if all(projected):
                 n = len(projected)
                 for i in range(n):
@@ -402,43 +574,11 @@ class Renderer:
                                     projected[i], projected[j],
                                     vs[i].z, vs[j].z,
                                     self.EDGE_STR, z_bias=0.005)
-
         return buffer
 
-    # -- line drawing (Bresenham) -------------------------------------------
-
-    def _draw_line(self, buffer, zbuffer, p1, p2, z1, z2, char, z_bias=0.0):
-        """Bresenham line with per-pixel z-buffer depth test."""
-        x1, y1 = p1
-        x2, y2 = p2
-        dx, dy = abs(x2 - x1), abs(y2 - y1)
-        sx = 1 if x1 < x2 else -1
-        sy = 1 if y1 < y2 else -1
-        err = dx - dy
-        total = max(dx, dy)
-        step = 0
-        while True:
-            if 0 <= x1 < self.width and 0 <= y1 < self.height:
-                t = step / total if total > 0 else 0.0
-                z = z1 + (z2 - z1) * t + z_bias
-                if z >= zbuffer[y1][x1]:
-                    zbuffer[y1][x1] = z
-                    buffer[y1][x1] = char
-            if x1 == x2 and y1 == y2:
-                break
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                x1 += sx
-            if e2 < dx:
-                err += dx
-                y1 += sy
-            step += 1
-
-    # -- per-pixel lit face fill --------------------------------------------
-
-    def _draw_face_lit(self, buffer, zbuffer, projected, v0, normal):
-        """Fill a convex polygon (3 or 4 verts) with per-pixel z-buffered point-light shading."""
+    def _draw_face_lit_ortho(self, buffer, zbuffer, projected, v0, normal):
+        """Fill a convex polygon with per-pixel z-buffered point-light shading
+        (orthographic projection)."""
         xs = [p[0] for p in projected]
         ys = [p[1] for p in projected]
         xmin = max(0, min(xs))
@@ -468,8 +608,6 @@ class Renderer:
                     wx = (x - cx) * inv_scale
                     wz = v0z - (nx * (wx - v0x) + ny * (wy - v0y)) * nz_inv
 
-                    # Z-buffer depth test — only draw if this pixel is
-                    # closer to the camera (higher z) than what's there
                     if wz < zbuffer[y][x]:
                         continue
                     zbuffer[y][x] = wz
@@ -491,7 +629,231 @@ class Renderer:
                     idx = int(brightness * num_shades)
                     buffer[y][x] = shading[max(0, min(num_shades, idx))]
 
-    # -- convex polygon containment test ------------------------------------
+    # ── perspective path (movement mode) ───────────────────────────────────
+
+    @staticmethod
+    def _clip_polygon_near(cam_vs: list, near: float) -> list:
+        """Sutherland-Hodgman clip of a camera-space polygon against the near
+        plane (cam_z = *near*).
+
+        Returns a new list of (cx, cy, cz) tuples representing the clipped
+        polygon, which may have more vertices than the input (up to +1 per
+        original edge).  Returns an empty list when the polygon is entirely
+        behind the near plane.
+        """
+        out = []
+        n = len(cam_vs)
+        for i in range(n):
+            cur = cam_vs[i]
+            nxt = cam_vs[(i + 1) % n]
+            cur_in = cur[2] > near
+            nxt_in = nxt[2] > near
+            if cur_in:
+                out.append(cur)
+                if not nxt_in:          # edge exits: emit intersection
+                    t = (near - cur[2]) / (nxt[2] - cur[2])
+                    out.append((
+                        cur[0] + t * (nxt[0] - cur[0]),
+                        cur[1] + t * (nxt[1] - cur[1]),
+                        near,
+                    ))
+            elif nxt_in:                # edge enters: emit intersection
+                t = (near - cur[2]) / (nxt[2] - cur[2])
+                out.append((
+                    cur[0] + t * (nxt[0] - cur[0]),
+                    cur[1] + t * (nxt[1] - cur[1]),
+                    near,
+                ))
+        return out
+
+    def _project_vertex_persp(self, cam_v: tuple) -> 'tuple | None':
+        """Perspective projection of a camera-space vertex → (sx, sy) or None.
+
+        After near-plane clipping, vertices at cam_z ≈ near can project to
+        extreme screen coordinates.  Instead of rejecting them (which would
+        discard the entire face), we clamp to a generous range.  The fill
+        loop already clamps its bounding box to screen bounds, so large
+        off-screen coordinates are harmless — we just cap them to limit
+        Bresenham edge-drawing cost.
+        """
+        cx, cy, cz = cam_v
+        if cz <= self.near_plane:
+            return None
+        x = round(self.focal * cx / cz + self.width // 2)
+        y = round(-self.focal * cy / (cz * self.CHAR_ASPECT) + self.height // 2)
+        # Clamp (not reject) to keep faces visible when partially off-screen
+        LIMIT = max(self.width, self.height) * 10
+        x = max(-LIMIT, min(LIMIT, x))
+        y = max(-LIMIT, min(LIMIT, y))
+        return (x, y)
+
+    def _render_perspective(self, model: Model, camera: Camera) -> list:
+        """Render with perspective projection through *camera*.
+
+        Back-face culling is intentionally disabled so that geometry remains
+        visible when the camera is inside or intersecting a mesh.  The
+        z-buffer resolves occlusion instead.
+
+        Faces that straddle the near plane are clipped via Sutherland-Hodgman
+        rather than discarded wholesale.
+        """
+        near = self.near_plane
+
+        # Transform the light into camera space (once per frame)
+        light_cam = camera.view_transform(self.light_pos.x,
+                                          self.light_pos.y,
+                                          self.light_pos.z)
+
+        # Gather visible faces ───────────────────────────────────────────
+        visible = []
+
+        for vs, center, normal in model.get_face_data():
+            # Transform vertices to camera space
+            cam_vs = [camera.view_transform(v.x, v.y, v.z) for v in vs]
+
+            # Skip if every vertex is behind the near plane
+            if not any(cv[2] > near for cv in cam_vs):
+                continue
+
+            # Clip against the near plane (Sutherland-Hodgman)
+            clipped = self._clip_polygon_near(cam_vs, near)
+            if len(clipped) < 3:
+                continue
+
+            cam_n = camera.transform_direction(
+                normal.x, normal.y, normal.z)
+            visible.append((clipped, cam_n))
+
+        # Draw ────────────────────────────────────────────────────────────
+        buffer = [[' '] * self.width for _ in range(self.height)]
+        zbuffer = [[-1e30] * self.width for _ in range(self.height)]
+
+        # Filled faces
+        for cam_vs, cam_n in visible:
+            projected = [self._project_vertex_persp(cv) for cv in cam_vs]
+            if all(projected):
+                self._draw_face_lit_persp(buffer, zbuffer, projected,
+                                          cam_vs[0], cam_n, light_cam)
+
+        # Edges (with small z-bias so they sit in front of their face)
+        for cam_vs, cam_n in visible:
+            projected = [self._project_vertex_persp(cv) for cv in cam_vs]
+            if all(projected):
+                nv = len(projected)
+                for i in range(nv):
+                    j = (i + 1) % nv
+                    # z-buffer depth = -cam_z  (higher = closer)
+                    self._draw_line(buffer, zbuffer,
+                                    projected[i], projected[j],
+                                    -cam_vs[i][2], -cam_vs[j][2],
+                                    self.EDGE_STR, z_bias=0.005)
+        return buffer
+
+    def _draw_face_lit_persp(self, buffer, zbuffer, projected,
+                             cam_v0, cam_normal, light_cam):
+        """Fill a convex polygon with perspective-correct z-buffered lighting.
+
+        All coordinates are in **camera space**.
+
+        Depth is stored as ``-cam_z`` so that the existing z-buffer convention
+        (higher value = closer) is preserved.
+        """
+        xs = [p[0] for p in projected]
+        ys = [p[1] for p in projected]
+        xmin = max(0, min(xs))
+        xmax = min(self.width - 1, max(xs))
+        ymin = max(0, min(ys))
+        ymax = min(self.height - 1, max(ys))
+
+        scx = self.width // 2
+        scy = self.height // 2
+        focal = self.focal
+        inv_focal = 1.0 / focal
+        char_aspect = self.CHAR_ASPECT
+
+        cnx, cny, cnz = cam_normal
+        cv0x, cv0y, cv0z = cam_v0
+        d = cnx * cv0x + cny * cv0y + cnz * cv0z   # plane constant
+
+        lcx, lcy, lcz = light_cam
+        shading = self.SHADING
+        num_shades = len(shading) - 1
+        ambient = self.ambient
+        _sqrt = math.sqrt
+        n_verts = len(projected)
+        near = self.near_plane
+
+        for y in range(ymin, ymax + 1):
+            ry = -(y - scy) * char_aspect * inv_focal
+            for x in range(xmin, xmax + 1):
+                if self._point_in_polygon(x, y, projected, n_verts):
+                    rx = (x - scx) * inv_focal
+
+                    # Reconstruct camera-space depth from face plane equation
+                    denom = cnx * rx + cny * ry + cnz
+                    if abs(denom) < 1e-10:
+                        continue
+                    cam_z = d / denom
+                    if cam_z <= near:
+                        continue
+
+                    # Z-buffer test  (depth = -cam_z; higher = closer)
+                    zbuf_z = -cam_z
+                    if zbuf_z < zbuffer[y][x]:
+                        continue
+                    zbuffer[y][x] = zbuf_z
+
+                    # Camera-space position on the face
+                    cam_x = rx * cam_z
+                    cam_y = ry * cam_z
+
+                    # Point-light shading in camera space
+                    dlx = lcx - cam_x
+                    dly = lcy - cam_y
+                    dlz = lcz - cam_z
+                    dist = _sqrt(dlx * dlx + dly * dly + dlz * dlz)
+                    if dist > 0:
+                        inv_d = 1.0 / dist
+                        diffuse = max(0.0, cnx * dlx * inv_d
+                                       + cny * dly * inv_d
+                                       + cnz * dlz * inv_d)
+                        atten = 1.0 / (1.0 + 0.02 * dist * dist)
+                        brightness = ambient + (1.0 - ambient) * diffuse * atten
+                    else:
+                        brightness = 1.0
+
+                    idx = int(brightness * num_shades)
+                    buffer[y][x] = shading[max(0, min(num_shades, idx))]
+
+    # ── shared helpers ─────────────────────────────────────────────────────
+
+    def _draw_line(self, buffer, zbuffer, p1, p2, z1, z2, char, z_bias=0.0):
+        """Bresenham line with per-pixel z-buffer depth test."""
+        x1, y1 = p1
+        x2, y2 = p2
+        dx, dy = abs(x2 - x1), abs(y2 - y1)
+        sx = 1 if x1 < x2 else -1
+        sy = 1 if y1 < y2 else -1
+        err = dx - dy
+        total = max(dx, dy)
+        step = 0
+        while True:
+            if 0 <= x1 < self.width and 0 <= y1 < self.height:
+                t = step / total if total > 0 else 0.0
+                z = z1 + (z2 - z1) * t + z_bias
+                if z >= zbuffer[y1][x1]:
+                    zbuffer[y1][x1] = z
+                    buffer[y1][x1] = char
+            if x1 == x2 and y1 == y2:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x1 += sx
+            if e2 < dx:
+                err += dx
+                y1 += sy
+            step += 1
 
     @staticmethod
     def _point_in_polygon(px, py, projected, n):
@@ -509,8 +871,6 @@ class Renderer:
                 return False
         return True
 
-    # -- buffer → string ----------------------------------------------------
-
     def buffer_to_string(self, buffer):
         return '\n'.join(''.join(row) for row in buffer)
 
@@ -527,41 +887,147 @@ MODELS = {
 
 
 class SpinningModel:
-    """Main application class — works with any Model."""
+    """Main application class — works with any Model.
+
+    Supports two interactive modes:
+      • ``rotate``  — model auto-spins (original behaviour)
+      • ``move``    — free-camera navigation with perspective projection
+    """
 
     def __init__(self, args):
         self.args = args
         model_cls = MODELS[args.model]
         self.model = model_cls(args.size)
         self.renderer = Renderer(args.width, args.height, self.model)
+        self.renderer.set_fov(getattr(args, 'fov', 90.0))
         self.running = True
+        self.mode = 'move' if getattr(args, 'move', False) else 'rotate'
+        self.keyboard = None
+
+        # Camera for movement mode — start far enough back to see the model
+        radius = self.model.bounding_radius()
+        self.camera = Camera(position=Vec3(0.0, radius * 0.3, radius * 3.0))
+
+        # Speeds (scale to model size for consistent feel)
+        self.move_speed = radius * 0.06
+        self.turn_speed = 0.05
+
+        # Key-state tracking for smooth held-key movement
+        # (bridges the terminal typematic delay so holding a key moves
+        #  continuously from the first press without the OS repeat-delay gap)
+        self._key_state = {}        # key name → last-press timestamp
+        self._key_timeout = 0.25    # seconds before a key is considered released
+
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, signum, frame):
         self.running = False
-        print()
+
+    # -- keyboard setup / teardown ------------------------------------------
+
+    def _setup_keyboard(self):
+        if HAS_TERMIOS:
+            self.keyboard = KeyboardInput()
+
+    def _teardown_keyboard(self):
+        if self.keyboard:
+            self.keyboard.restore()
+            self.keyboard = None
+
+    # -- input handling -----------------------------------------------------
+
+    def _handle_input(self):
+        if not self.keyboard:
+            return
+        now = time.time()
+        for key in self.keyboard.get_keys():
+            # Global keys (instant, not state-tracked)
+            if key in ('q', 'Q', '\x03'):
+                self.running = False
+                return
+            if key in ('TAB', 'm', 'M'):
+                self.mode = 'move' if self.mode == 'rotate' else 'rotate'
+                continue
+            # Record timestamp for key-state tracking
+            self._key_state[key] = now
+
+        # Apply movement for all currently-held keys (movement mode only).
+        # A key is considered "held" if it was pressed within the timeout
+        # window — this bridges the OS typematic delay so that holding a
+        # key gives smooth, immediate continuous movement.
+        if self.mode == 'move':
+            held = {k for k, t in self._key_state.items()
+                    if now - t < self._key_timeout}
+            if held & {'UP', 'w', 'W'}:
+                self.camera.move_forward(self.move_speed)
+            if held & {'DOWN', 's', 'S'}:
+                self.camera.move_forward(-self.move_speed)
+            if 'LEFT' in held:
+                self.camera.turn(-self.turn_speed)
+            if 'RIGHT' in held:
+                self.camera.turn(self.turn_speed)
+            if held & {'a', 'A'}:
+                self.camera.move_right(-self.move_speed)
+            if held & {'d', 'D'}:
+                self.camera.move_right(self.move_speed)
+            if held & {'r', 'R', 'SPACE'}:
+                self.camera.move_up(self.move_speed)
+            if held & {'f', 'F'}:
+                self.camera.move_up(-self.move_speed)
+            if held & {'e', 'E'}:
+                self.camera.turn(0, self.turn_speed)
+            if held & {'c', 'C'}:
+                self.camera.turn(0, -self.turn_speed)
+
+    # -- update & render ----------------------------------------------------
 
     def update(self):
-        self.model.rotate(
-            self.args.speed_x,
-            self.args.speed_y,
-            self.args.speed_z if self.args.rotate_z else 0,
-        )
+        self._handle_input()
+        if self.mode == 'rotate':
+            self.model.rotate(
+                self.args.speed_x,
+                self.args.speed_y,
+                self.args.speed_z if self.args.rotate_z else 0,
+            )
 
     def render(self):
-        buffer = self.renderer.render(self.model)
-        sys.stdout.write('\033[2J\033[H' if os.name != 'nt' else '\x1b[2J\x1b[H')
-        sys.stdout.write(self.renderer.buffer_to_string(buffer))
+        if self.mode == 'move':
+            buffer = self.renderer.render(self.model, camera=self.camera)
+        else:
+            buffer = self.renderer.render(self.model)
+
+        # Build status bar
+        if self.mode == 'move':
+            status = ("\033[7m MOVE \033[0m "
+                      "WASD=move Arrows=turn R/F=up/dn E/C=pitch "
+                      "Tab=spin Q=quit")
+        else:
+            status = "\033[7m SPIN \033[0m Tab=move Q=quit"
+
+        out = '\033[H'                  # cursor home (no full clear → less flicker)
+        out += self.renderer.buffer_to_string(buffer)
+        out += '\n' + status + '\033[K'  # \033[K = clear to end of line
+        sys.stdout.write(out)
         sys.stdout.flush()
 
     def run(self):
-        frame_time = 1.0 / self.args.fps
-        while self.running:
-            start = time.time()
-            self.update()
-            self.render()
-            time.sleep(max(0, frame_time - (time.time() - start)))
+        self._setup_keyboard()
+        # Hide cursor for cleaner display
+        sys.stdout.write('\033[2J\033[H\033[?25l')
+        sys.stdout.flush()
+        try:
+            frame_time = 1.0 / self.args.fps
+            while self.running:
+                start = time.time()
+                self.update()
+                self.render()
+                time.sleep(max(0, frame_time - (time.time() - start)))
+        finally:
+            self._teardown_keyboard()
+            # Show cursor and clear screen on exit
+            sys.stdout.write('\033[?25h\033[2J\033[H')
+            sys.stdout.flush()
 
 
 def get_terminal_size():
@@ -597,6 +1063,10 @@ def main():
                         help='Z rotation speed (default: 0.02)')
     parser.add_argument('--rotate-z', action='store_true',
                         help='Enable Z-axis rotation')
+    parser.add_argument('--move', action='store_true',
+                        help='Start in movement mode (free camera navigation)')
+    parser.add_argument('--fov', type=float, default=90.0,
+                        help='Horizontal field of view in degrees (default: 90)')
     parser.add_argument('--frame', '-fr', type=int, default=None,
                         help='Render a specific frame and exit')
 
@@ -606,6 +1076,8 @@ def main():
         sys.exit('Error: FPS must be between 1 and 120')
     if args.width < 20 or args.height < 10:
         sys.exit('Error: Width >= 20 and height >= 10 required')
+    if not 10 <= args.fov <= 170:
+        sys.exit('Error: FOV must be between 10 and 170 degrees')
 
     app = SpinningModel(args)
     if args.frame is not None:
