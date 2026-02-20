@@ -1,6 +1,6 @@
 # ASCII 3D Model Renderer
 
-A zero-dependency Python CLI that renders spinning 3D models and an infinite procedural forest world in the terminal using ASCII shading, per-pixel point-light illumination, true-colour edge lines, and perspective camera navigation.
+A zero-dependency Python CLI that renders spinning 3D models and an infinite procedural forest world in the terminal using ASCII shading, per-pixel point-light illumination, true-colour edge lines, and perspective camera navigation. Also includes a full **HTML/JavaScript/WebGL port** that runs in any browser.
 
 ## How This Code Was Generated
 
@@ -10,15 +10,18 @@ The bulk of the development — planning, initial implementation, projection fix
 
 The project was then **extended significantly with [Claude Opus 4.6](https://www.anthropic.com/claude)** across three sessions (262 tool exchanges, 43 completion cycles), which handled: distortion analysis, quaternion-based rotation, auto-fit scaling, a new per-pixel lighting system, additional models (car, house scene), occlusion/culling fixes, documentation, free camera navigation with perspective projection, and a full procedural infinite forest world with terrain, mountains, and distance fog.
 
+Finally, the entire Python terminal renderer was **ported to HTML/JavaScript/WebGL** in a single Opus 4.6 session (42 tool exchanges, 2 completion cycles). This session analyzed all 22 subsystems in `run.py`, created a detailed architecture plan, then implemented 9 ES modules plus HTML/CSS — translating the CPU-based ASCII rasterizer into GPU-accelerated WebGL with GLSL shaders for lighting, fog, and wireframe rendering.
+
 | Phase | Model | Sessions | Steps | Tool Exchanges | Description |
 |-------|-------|----------|-------|----------------|-------------|
 | Core development | Local MiniMax-M2.5 Cluster | 2 | 23 | 256 | Rendering engine, projection, shading, edge lines, multi-model |
 | Analysis & polish | Opus 4.6 | 1 | 18 | 89 | Quaternion rotation, per-pixel lighting, z-buffer, car & house models |
 | Camera & movement | Opus 4.6 | 1 | 4 | 29 | Free camera, perspective projection, key-state tracking, FOV config |
 | Forest & terrain | Opus 4.6 | 1 | 21 | 144 | Infinite forest, terrain noise, mountains, distance fog, colour fading |
-| **Total** | | **5** | **66** | **518** | |
+| WebGL port | Opus 4.6 | 1 | 2 | 42 | Full HTML/JS/WebGL port of the Python terminal renderer |
+| **Total** | | **6** | **68** | **560** | |
 
-📋 **[Full prompt history →](prompt_history.md)** — every user prompt and assistant completion across all 5 sessions, extracted from the raw task logs.
+📋 **[Full prompt history →](prompt_history.md)** — every user prompt and assistant completion across all 6 sessions, extracted from the raw task logs.
 
 ## Requirements
 
@@ -51,6 +54,35 @@ chmod +x run.py
 ./run.py --model house
 ./run.py --forest --seed 123       # forest with custom seed
 ```
+
+## WebGL Port
+
+A full HTML/JavaScript/WebGL port of the Python terminal renderer lives in `webgl-port/`. It requires no build step — just serve the directory with any HTTP server:
+
+```bash
+cd webgl-port && python3 -m http.server 8080
+# Then open http://localhost:8080
+```
+
+The WebGL port supports the same three modes (spin, move, forest) and all three models (cube, car, house) via clickable UI buttons. URL parameters mirror the CLI options:
+
+```
+http://localhost:8080/?model=car          # start with car model
+http://localhost:8080/?forest             # start in forest mode
+http://localhost:8080/?forest&seed=123    # forest with custom seed
+http://localhost:8080/?move&fov=110       # move mode with wider FOV
+```
+
+### Key Differences from Python Original
+
+| Feature | Python (terminal) | WebGL Port |
+|---------|-------------------|------------|
+| Rasterization | CPU scanline + z-buffer | GPU hardware |
+| Clipping | Sutherland-Hodgman CPU | GPU native |
+| Edges | Bresenham line drawing | `GL_LINES` with depth bias |
+| Shading | Per-pixel ASCII brightness chars | GLSL point-light + fog |
+| Output | ASCII characters in terminal | Smooth WebGL canvas rendering |
+| Integer math | Arbitrary precision | `Math.imul()` for 32-bit fidelity |
 
 ## Modes
 
@@ -229,18 +261,22 @@ run.py
 
 ```
 m25test/
-├── run.py                                           # All code — models, renderer, forest, CLI (~1830 lines)
+├── run.py                                           # Python terminal renderer (~1830 lines)
+├── webgl-port/                                      # HTML/JS/WebGL port (Session 6)
+│   ├── index.html                                   # Canvas + HUD overlay
+│   ├── css/style.css                                # Dark theme, green accent
+│   └── js/
+│       ├── math.js                                  # Vec3, Quaternion, mat4 utilities
+│       ├── camera.js                                # First-person camera (yaw/pitch, view matrix)
+│       ├── input.js                                 # Keyboard input manager
+│       ├── models.js                                # Cube, Car, HouseScene geometry builders
+│       ├── terrain.js                               # Procedural terrain height + grid generation
+│       ├── forest.js                                # Forest primitives + chunk streaming
+│       ├── renderer.js                              # WebGL renderer (fill + wireframe shaders)
+│       └── main.js                                  # Entry point, modes, animation loop
 ├── extract_prompts.py                               # Script to extract prompt history from task logs
 ├── prompt_history.md                                # Extracted prompt history (generated)
-├── plans/
-│   └── procedural_forest_plan.md                    # Architecture plan for the forest system
-├── kilo_code_task_feb-19-2026_9-37-22-am.md         # Session 1 raw task log (MiniMax)
-├── kilo_code_task_feb-19-2026_12-30-00-pm.md        # Session 2 raw task log (MiniMax)
-├── opus_kilo_code_task_feb-19-2026_2-37-48-pm.md    # Session 3 raw task log (Opus)
-├── opus_kilo_code_task_feb-19-2026_7-34-40-pm.md    # Session 4 raw task log (Opus)
-├── opus_kilo_code_task_feb-19-2026_10-36-17-pm.md   # Session 5 raw task log (Opus)
 ├── README.md                                        # This file
-└── PLAN.md                                          # Original project plan
 ```
 
 ## Exit

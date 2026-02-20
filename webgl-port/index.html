@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ASCII 3D Model Renderer — WebGL Port</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <canvas id="glcanvas"></canvas>
+
+    <!-- HUD overlay -->
+    <div id="hud">
+        <!-- Top bar: model selector + mode toggle -->
+        <div id="top-bar">
+            <span class="label">Model:</span>
+            <button class="model-btn active" data-model="cube">Cube</button>
+            <button class="model-btn" data-model="car">Car</button>
+            <button class="model-btn" data-model="house">House</button>
+            <div class="separator"></div>
+            <button class="model-btn" data-model="forest">🌲 Forest</button>
+            <div class="separator"></div>
+            <button id="mode-toggle">Tab: Switch Mode</button>
+        </div>
+
+        <!-- Bottom bar: mode badge + controls + status -->
+        <div id="bottom-bar">
+            <span id="mode-badge" class="mode-badge spin">SPIN</span>
+            <span id="controls-help">Tab=move</span>
+            <span id="status-bar">Frame:0</span>
+        </div>
+    </div>
+
+    <script type="module" src="js/main.js"></script>
+</body>
+</html>
