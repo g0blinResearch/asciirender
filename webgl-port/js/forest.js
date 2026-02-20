@@ -297,13 +297,24 @@ export class ForestWorld {
      * Load/unload chunks based on camera position.
      * Returns arrays of newly loaded and unloaded chunk keys.
      */
+    /**
+     * Load/unload chunks based on camera position.
+     *
+     * Three loading tiers:
+     *   1. Full detail (objects + terrain) within renderDistance
+     *   2. Intermediate terrain-only within terrainRd — fills the visual
+     *      gap between nearby geometry and distant mountains so the ground
+     *      connects seamlessly and mountains don't appear to float.
+     *   3. Mountain-only terrain beyond terrainRd where chunkHasMountain()
+     *      is true — renders distant peak silhouettes.
+     */
     update(cameraPosition) {
         const cs = this.chunkSize;
         const camCx = Math.floor(cameraPosition.x / cs);
         const camCz = Math.floor(cameraPosition.z / cs);
         const rd = this.renderDistance;
 
-        // Normal chunks (full detail)
+        // ── Tier 1: normal chunks (full detail) ─────────────────────────
         const needed = new Set();
         for (let dx = -rd; dx <= rd; dx++) {
             for (let dz = -rd; dz <= rd; dz++) {
@@ -311,13 +322,30 @@ export class ForestWorld {
             }
         }
 
-        // Extended mountain chunks (terrain-only)
+        // Mountain scan radius (used by tiers 2 and 3)
         const mtnRd = Math.max(16, rd * 3);
+
+        // ── Tier 2: intermediate terrain-only chunks ────────────────────
+        // Fills the gap between nearby detail and distant mountains so
+        // the ground is visible all the way to the horizon.  Capped to
+        // keep chunk count manageable.
+        const terrainRd = Math.max(8, rd * 3);
+        const terrainNeeded = new Set();
+        for (let dx = -terrainRd; dx <= terrainRd; dx++) {
+            for (let dz = -terrainRd; dz <= terrainRd; dz++) {
+                const key = this._key(camCx + dx, camCz + dz);
+                if (!needed.has(key)) {
+                    terrainNeeded.add(key);
+                }
+            }
+        }
+
+        // ── Tier 3: extended mountain chunks (terrain-only) ─────────────
         const mtnNeeded = new Set();
         for (let dx = -mtnRd; dx <= mtnRd; dx++) {
             for (let dz = -mtnRd; dz <= mtnRd; dz++) {
                 const key = this._key(camCx + dx, camCz + dz);
-                if (needed.has(key)) continue;
+                if (needed.has(key) || terrainNeeded.has(key)) continue;
                 const cx = camCx + dx, cz = camCz + dz;
                 if (!this._mtnCache.has(key)) {
                     this._mtnCache.set(key, chunkHasMountain(cx, cz, cs, this.seed));
@@ -329,7 +357,7 @@ export class ForestWorld {
         }
         this.lastMtnChunks = mtnNeeded.size;
 
-        const allNeeded = new Set([...needed, ...mtnNeeded]);
+        const allNeeded = new Set([...needed, ...terrainNeeded, ...mtnNeeded]);
 
         // Unload
         const toRemove = [];
@@ -346,7 +374,7 @@ export class ForestWorld {
         const maxLoad = rd <= 3 ? 2 : 4;
         let loaded = 0;
 
-        // Full-detail chunks first
+        // Prioritise full-detail chunks
         for (const key of needed) {
             if (!this.chunks.has(key)) {
                 const [cx, cz] = key.split(',').map(Number);
@@ -356,7 +384,19 @@ export class ForestWorld {
             }
         }
 
-        // Mountain chunks (terrain-only, higher budget)
+        // Then intermediate terrain-only chunks (cheap, coarse grid).
+        let terrainLoaded = 0;
+        const terrainMax = 8;
+        for (const key of terrainNeeded) {
+            if (!this.chunks.has(key)) {
+                const [cx, cz] = key.split(',').map(Number);
+                this.chunks.set(key, new ForestChunk(cx, cz, cs, this.seed, true));
+                terrainLoaded++;
+                if (terrainLoaded >= terrainMax) break;
+            }
+        }
+
+        // Then distant mountain chunks (terrain-only, higher budget)
         let mtnLoaded = 0;
         const mtnMax = 8;
         for (const key of mtnNeeded) {

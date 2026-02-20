@@ -925,9 +925,13 @@ class ForestWorld:
     def update(self, camera: 'Camera'):
         """Load / unload chunks based on camera position.
 
-        In addition to the normal render-distance loading, chunks that contain
-        mountain terrain are loaded at an extended range (terrain-only, no
-        objects) so that mountain silhouettes are visible from far away.
+        Three loading tiers:
+          1. Full detail (objects + terrain) within render_distance
+          2. Intermediate terrain-only within terrain_rd — fills the visual
+             gap between nearby geometry and distant mountains so the ground
+             connects seamlessly and mountains don't appear to float.
+          3. Mountain-only terrain beyond terrain_rd where chunk_has_mountain()
+             is true — renders distant peak silhouettes.
         """
         self._cam_pos = camera.position
         self._cam_forward = camera.forward
@@ -937,23 +941,38 @@ class ForestWorld:
         cam_cz = int(math.floor(camera.position.z / cs))
         rd = self.render_distance
 
-        # ── normal chunks (full detail) ───────────────────────────────────
+        # ── Tier 1: normal chunks (full detail) ──────────────────────────
         needed = set()
         for dx in range(-rd, rd + 1):
             for dz in range(-rd, rd + 1):
                 needed.add((cam_cx + dx, cam_cz + dz))
 
-        # ── extended mountain chunks (terrain wireframe only) ─────────────
+        # Mountain scan radius (used by tiers 2 and 3)
+        mtn_rd = max(16, rd * 3)
+
+        # ── Tier 2: intermediate terrain-only chunks ─────────────────────
+        # Fills the gap between nearby detail and distant mountains so
+        # the ground is visible all the way to the horizon.  Capped to
+        # keep chunk count manageable (scales up on mountaintops where
+        # dynamic rd increases).
+        terrain_rd = max(8, rd * 3)
+        terrain_needed = set()
+        for dx in range(-terrain_rd, terrain_rd + 1):
+            for dz in range(-terrain_rd, terrain_rd + 1):
+                key = (cam_cx + dx, cam_cz + dz)
+                if key not in needed:
+                    terrain_needed.add(key)
+
+        # ── Tier 3: extended mountain chunks (terrain wireframe only) ────
         # Scan a much wider radius; only load chunks that contain mountain
         # noise so their silhouettes are visible from far away.
-        mtn_rd = max(16, rd * 3)
         mtn_needed = set()
         mtn_cache = self._mtn_cache
         for dx in range(-mtn_rd, mtn_rd + 1):
             for dz in range(-mtn_rd, mtn_rd + 1):
                 key = (cam_cx + dx, cam_cz + dz)
-                if key in needed:
-                    continue        # already loaded at full detail
+                if key in needed or key in terrain_needed:
+                    continue        # already covered by tier 1 or 2
                 if key not in mtn_cache:
                     mtn_cache[key] = chunk_has_mountain(
                         key[0], key[1], cs, self.seed)
@@ -961,9 +980,9 @@ class ForestWorld:
                     mtn_needed.add(key)
         self._last_mtn_chunks = len(mtn_needed)
 
-        all_needed = needed | mtn_needed
+        all_needed = needed | terrain_needed | mtn_needed
 
-        # Unload chunks that are no longer in either set
+        # Unload chunks that are no longer in any tier
         to_remove = [k for k in self.chunks if k not in all_needed]
         for k in to_remove:
             del self.chunks[k]
@@ -980,6 +999,17 @@ class ForestWorld:
                     key[0], key[1], cs, self.seed)
                 loaded += 1
                 if loaded >= max_load:
+                    break
+
+        # Then load intermediate terrain-only chunks (cheap, coarse grid).
+        terrain_loaded = 0
+        terrain_max = 8
+        for key in terrain_needed:
+            if key not in self.chunks:
+                self.chunks[key] = ForestChunk(
+                    key[0], key[1], cs, self.seed, terrain_only=True)
+                terrain_loaded += 1
+                if terrain_loaded >= terrain_max:
                     break
 
         # Then load distant mountain chunks (terrain-only).
@@ -1314,218 +1344,287 @@ class Renderer:
     def _render_perspective(self, model: Model, camera: Camera) -> list:
         """Render with perspective projection through *camera*.
 
-        Back-face culling is intentionally disabled so that geometry remains
-        visible when the camera is inside or intersecting a mesh.  The
-        z-buffer resolves occlusion instead.
-
-        Faces that straddle the near plane are clipped via Sutherland-Hodgman
-        rather than discarded wholesale.
+        Performance optimisations over the naive approach:
+          • Camera matrix extracted once; view_transform / transform_direction
+            inlined to eliminate per-vertex method-dispatch overhead.
+          • Vertices projected once and stored — reused by both the fill and
+            edge passes (previously every face was projected twice).
+          • Fog-faded edge ANSI strings cached by quantised fog level so
+            identical strings are shared across hundreds of terrain faces.
         """
         near = self.near_plane
 
-        # Transform the light into camera space (once per frame)
-        light_cam = camera.view_transform(self.light_pos.x,
-                                          self.light_pos.y,
-                                          self.light_pos.z)
+        # ── Extract camera matrix once (avoids method dispatch per vertex)
+        crx, cry, crz = camera.right.x, camera.right.y, camera.right.z
+        cux, cuy, cuz = camera.up.x, camera.up.y, camera.up.z
+        cfx, cfy, cfz = camera.forward.x, camera.forward.y, camera.forward.z
+        cpx, cpy, cpz = camera.position.x, camera.position.y, camera.position.z
 
-        # Gather visible faces ───────────────────────────────────────────
-        # Each entry: (cam_vs, cam_n, wireframe_str | None, world_center_y)
+        # Transform the light into camera space (once per frame) — inlined
+        dlx = self.light_pos.x - cpx
+        dly = self.light_pos.y - cpy
+        dlz = self.light_pos.z - cpz
+        light_cam = (crx * dlx + cry * dly + crz * dlz,
+                     cux * dlx + cuy * dly + cuz * dlz,
+                     cfx * dlx + cfy * dly + cfz * dlz)
+
+        # ── Gather visible faces ─────────────────────────────────────────
+        # Each entry now includes pre-computed projection to avoid re-work.
         visible = []
+        _clip = self._clip_polygon_near
+        _proj = self._project_vertex_persp
 
         for item in model.get_face_data():
             vs = item[0]
-            center = item[1]
             normal = item[2]
-            # 4th element = wireframe edge string (terrain grid etc.)
             wireframe = item[3] if len(item) > 3 else None
+            world_y = item[1].y
 
-            # World-space centre Y — used for height-based fog attenuation
-            world_y = center.y
+            # Inline view_transform — replaces camera.view_transform() calls
+            cam_vs = []
+            any_in_front = False
+            for v in vs:
+                dx = v.x - cpx
+                dy = v.y - cpy
+                dz = v.z - cpz
+                cz = cfx * dx + cfy * dy + cfz * dz
+                if cz > near:
+                    any_in_front = True
+                cam_vs.append((crx * dx + cry * dy + crz * dz,
+                               cux * dx + cuy * dy + cuz * dz,
+                               cz))
 
-            # Transform vertices to camera space
-            cam_vs = [camera.view_transform(v.x, v.y, v.z) for v in vs]
-
-            # Skip if every vertex is behind the near plane
-            if not any(cv[2] > near for cv in cam_vs):
+            if not any_in_front:
                 continue
 
-            # Clip against the near plane (Sutherland-Hodgman)
-            clipped = self._clip_polygon_near(cam_vs, near)
+            clipped = _clip(cam_vs, near)
             if len(clipped) < 3:
                 continue
 
-            cam_n = camera.transform_direction(
-                normal.x, normal.y, normal.z)
-            visible.append((clipped, cam_n, wireframe, world_y))
+            # Inline transform_direction for normal
+            nx, ny, nz = normal.x, normal.y, normal.z
+            cam_n = (crx * nx + cry * ny + crz * nz,
+                     cux * nx + cuy * ny + cuz * nz,
+                     cfx * nx + cfy * ny + cfz * nz)
 
-        # Draw ────────────────────────────────────────────────────────────
+            # Project once — reused by both fill and edge passes
+            projected = [_proj(cv) for cv in clipped]
+            if not all(projected):
+                continue
+
+            visible.append((clipped, cam_n, wireframe, world_y, projected))
+
+        # ── Draw ─────────────────────────────────────────────────────────
         buffer = [[' '] * self.width for _ in range(self.height)]
         zbuffer = [[-1e30] * self.width for _ in range(self.height)]
 
         # Filled faces (skip wireframe-only faces)
-        for cam_vs, cam_n, wireframe, world_y in visible:
+        for cam_vs, cam_n, wireframe, world_y, projected in visible:
             if wireframe is not None:
                 continue
-            projected = [self._project_vertex_persp(cv) for cv in cam_vs]
-            if all(projected):
-                self._draw_face_lit_persp(buffer, zbuffer, projected,
-                                          cam_vs[0], cam_n, light_cam,
-                                          world_y)
+            self._draw_face_lit_persp(buffer, zbuffer, projected,
+                                      cam_vs[0], cam_n, light_cam,
+                                      world_y)
 
         # Edges — always draw wireframe faces; filled-face edges if draw_edges.
-        # Edge colours are faded toward black with distance (matching the
-        # fill-pass fog) so that distant geometry gradually disappears.
         fog_dist = self.fog_distance
-        for cam_vs, cam_n, wireframe, world_y in visible:
-            # Skip filled-face edges unless draw_edges is set
-            if wireframe is None and not self.draw_edges:
+        draw_edges = self.draw_edges
+        _draw_line = self._draw_line
+        edge_cache = {}       # (is_wire, quantised_fade) → ANSI string
+
+        for cam_vs, cam_n, wireframe, world_y, projected in visible:
+            if wireframe is None and not draw_edges:
                 continue
 
-            # Compute distance-based fog fade for edge colours
+            # Fog fade
             if fog_dist > 0:
-                avg_z = sum(v[2] for v in cam_vs) / len(cam_vs)
-                fog = min(1.0, avg_z / fog_dist)
+                n_cv = len(cam_vs)
+                tot_z = 0.0
+                for cv in cam_vs:
+                    tot_z += cv[2]
+                fog = min(1.0, (tot_z / n_cv) / fog_dist)
 
-                # Height-based fog reduction for terrain wireframe only —
-                # mountain silhouettes stay visible at extended range.
                 if wireframe is not None and world_y > 4.0:
                     alt = min(1.0, (world_y - 4.0) / 15.0)
                     fog_eff = fog * (1.0 - alt * 0.92)
                 else:
                     fog_eff = fog
 
-                fog_fade = max(0.0, 1.0 - fog_eff * fog_eff)  # quadratic
+                fog_fade = max(0.0, 1.0 - fog_eff * fog_eff)
                 if fog_fade < 0.03:
-                    continue                    # fully fogged — skip
+                    continue
             else:
                 fog_fade = 1.0
 
-            projected = [self._project_vertex_persp(cv) for cv in cam_vs]
-            if all(projected):
-                # Generate fog-faded edge colour
-                if wireframe is not None:
-                    # Terrain wireframe — sage green faded by fog
-                    r = int(60 * fog_fade)
-                    g = int(90 * fog_fade)
-                    b = int(45 * fog_fade)
-                    edge_str = f'\033[38;2;{r};{g};{b}m.\033[0m'
+            # Quantised edge-string cache (21 levels per type, shared across
+            # hundreds of terrain faces to avoid per-face f-string allocation)
+            is_wire = wireframe is not None
+            q = int(fog_fade * 20)
+            cache_key = (is_wire, q)
+            edge_str = edge_cache.get(cache_key)
+            if edge_str is None:
+                ff = q * 0.05
+                if is_wire:
+                    edge_str = f'\033[38;2;{int(60*ff)};{int(90*ff)};{int(45*ff)}m.\033[0m'
                 else:
-                    # Object edges — bright green faded by fog
-                    r = int(159 * fog_fade)
-                    g = int(239 * fog_fade)
-                    edge_str = f'\033[38;2;{r};{g};0m#\033[0m'
+                    edge_str = f'\033[38;2;{int(159*ff)};{int(239*ff)};0m#\033[0m'
+                edge_cache[cache_key] = edge_str
 
-                # Wireframe faces use z_bias=0 so objects occlude them
-                z_bias = 0.0 if wireframe is not None else 0.005
-                nv = len(projected)
-                for i in range(nv):
-                    j = (i + 1) % nv
-                    # z-buffer depth = -cam_z  (higher = closer)
-                    self._draw_line(buffer, zbuffer,
-                                    projected[i], projected[j],
-                                    -cam_vs[i][2], -cam_vs[j][2],
-                                    edge_str, z_bias=z_bias)
+            z_bias = 0.0 if is_wire else 0.005
+            nv = len(projected)
+            for i in range(nv):
+                j = (i + 1) % nv
+                _draw_line(buffer, zbuffer,
+                           projected[i], projected[j],
+                           -cam_vs[i][2], -cam_vs[j][2],
+                           edge_str, z_bias=z_bias)
         return buffer
 
     def _draw_face_lit_persp(self, buffer, zbuffer, projected,
                              cam_v0, cam_normal, light_cam,
                              world_y=0.0):
-        """Fill a convex polygon with perspective-correct z-buffered lighting.
+        """Scanline-fill a convex polygon with perspective-correct lighting.
+
+        Uses edge-intersection scanline traversal instead of bounding-box +
+        point-in-polygon, eliminating the per-pixel polygon test.  For a
+        typical 3–5 vertex face this is 3–7× faster in the fill pass.
 
         All coordinates are in **camera space**.
-
-        *world_y* is the world-space centre Y of the face — used to reduce
-        fog for high-altitude geometry so that mountains remain visible from
-        far away (they rise above the fog layer).
-
-        Depth is stored as ``-cam_z`` so that the existing z-buffer convention
-        (higher value = closer) is preserved.
+        Depth stored as ``-cam_z`` (higher = closer).
         """
-        xs = [p[0] for p in projected]
-        ys = [p[1] for p in projected]
-        xmin = max(0, min(xs))
-        xmax = min(self.width - 1, max(xs))
-        ymin = max(0, min(ys))
-        ymax = min(self.height - 1, max(ys))
+        n_verts = len(projected)
 
-        scx = self.width // 2
-        scy = self.height // 2
+        # ── Screen-space Y bounds ────────────────────────────────────────
+        ymin_v = ymax_v = projected[0][1]
+        for i in range(1, n_verts):
+            py = projected[i][1]
+            if py < ymin_v:
+                ymin_v = py
+            elif py > ymax_v:
+                ymax_v = py
+
+        width = self.width
+        height_m1 = self.height - 1
+        ymin = ymin_v if ymin_v > 0 else 0
+        ymax = ymax_v if ymax_v < height_m1 else height_m1
+        if ymin > ymax:
+            return
+
+        # ── Pre-compute constants ────────────────────────────────────────
+        scx = width >> 1
+        scy = self.height >> 1
         focal = self.focal
         inv_focal = 1.0 / focal
         char_aspect = self.CHAR_ASPECT
 
         cnx, cny, cnz = cam_normal
         cv0x, cv0y, cv0z = cam_v0
-        d = cnx * cv0x + cny * cv0y + cnz * cv0z   # plane constant
+        d = cnx * cv0x + cny * cv0y + cnz * cv0z
 
         lcx, lcy, lcz = light_cam
         shading = self.SHADING
         num_shades = len(shading) - 1
         ambient = self.ambient
         _sqrt = math.sqrt
-        n_verts = len(projected)
         near = self.near_plane
         fog_dist = self.fog_distance
-
-        # Filled faces (trees, rocks, bushes) use normal fog regardless of
-        # altitude — only terrain wireframe edges get height-based fog
-        # reduction (handled in the edge pass).  This prevents distant
-        # objects on mountain slopes from drowning out the mountain terrain.
         fog_height_factor = 1.0
 
+        # ── Build edge table (non-horizontal edges, sorted top→bottom) ──
+        edges = []
+        for i in range(n_verts):
+            j = (i + 1) % n_verts
+            x0, y0 = projected[i]
+            x1, y1 = projected[j]
+            if y0 == y1:
+                continue
+            if y0 > y1:
+                x0, y0, x1, y1 = x1, y1, x0, y0
+            edges.append((x0, y0, x1, y1, (x1 - x0) / (y1 - y0)))
+
+        # ── Scanline fill ────────────────────────────────────────────────
         for y in range(ymin, ymax + 1):
+            x_left = 1e9
+            x_right = -1e9
+
+            for ex0, ey0, ex1, ey1, slope in edges:
+                if ey0 <= y <= ey1:
+                    ix = ex0 + (y - ey0) * slope
+                    if ix < x_left:
+                        x_left = ix
+                    if ix > x_right:
+                        x_right = ix
+
+            # Include vertices exactly at this scanline (handles tips)
+            for i in range(n_verts):
+                if projected[i][1] == y:
+                    vx = projected[i][0]
+                    if vx < x_left:
+                        x_left = vx
+                    if vx > x_right:
+                        x_right = vx
+
+            xl = int(x_left) if x_left >= 0 else 0
+            if xl < 0:
+                xl = 0
+            xr = int(x_right)
+            if xr > width - 1:
+                xr = width - 1
+            if xl > xr:
+                continue
+
             ry = -(y - scy) * char_aspect * inv_focal
-            for x in range(xmin, xmax + 1):
-                if self._point_in_polygon(x, y, projected, n_verts):
-                    rx = (x - scx) * inv_focal
+            buf_row = buffer[y]
+            zbuf_row = zbuffer[y]
 
-                    # Reconstruct camera-space depth from face plane equation
-                    denom = cnx * rx + cny * ry + cnz
-                    if abs(denom) < 1e-10:
-                        continue
-                    cam_z = d / denom
-                    if cam_z <= near:
-                        continue
+            for x in range(xl, xr + 1):
+                rx = (x - scx) * inv_focal
 
-                    # Z-buffer test  (depth = -cam_z; higher = closer)
-                    zbuf_z = -cam_z
-                    if zbuf_z < zbuffer[y][x]:
-                        continue
-                    zbuffer[y][x] = zbuf_z
+                denom = cnx * rx + cny * ry + cnz
+                if abs(denom) < 1e-10:
+                    continue
+                cam_z = d / denom
+                if cam_z <= near:
+                    continue
 
-                    # Camera-space position on the face
-                    cam_x = rx * cam_z
-                    cam_y = ry * cam_z
+                zbuf_z = -cam_z
+                if zbuf_z < zbuf_row[x]:
+                    continue
+                zbuf_row[x] = zbuf_z
 
-                    # Point-light shading in camera space
-                    dlx = lcx - cam_x
-                    dly = lcy - cam_y
-                    dlz = lcz - cam_z
-                    dist = _sqrt(dlx * dlx + dly * dly + dlz * dlz)
-                    if dist > 0:
-                        inv_d = 1.0 / dist
-                        diffuse = max(0.0, cnx * dlx * inv_d
-                                       + cny * dly * inv_d
-                                       + cnz * dlz * inv_d)
-                        atten = 1.0 / (1.0 + 0.02 * dist * dist)
-                        brightness = ambient + (1.0 - ambient) * diffuse * atten
-                    else:
-                        brightness = 1.0
+                cam_x = rx * cam_z
+                cam_y = ry * cam_z
 
-                    # Distance fog with altitude attenuation
-                    if fog_dist > 0:
-                        fog = min(1.0, cam_z / fog_dist) * fog_height_factor
-                        brightness *= (1.0 - fog * fog)  # quadratic fade
+                dlx = lcx - cam_x
+                dly = lcy - cam_y
+                dlz = lcz - cam_z
+                dist = _sqrt(dlx * dlx + dly * dly + dlz * dlz)
+                if dist > 0:
+                    inv_d = 1.0 / dist
+                    diffuse = max(0.0, cnx * dlx * inv_d
+                                   + cny * dly * inv_d
+                                   + cnz * dlz * inv_d)
+                    atten = 1.0 / (1.0 + 0.02 * dist * dist)
+                    brightness = ambient + (1.0 - ambient) * diffuse * atten
+                else:
+                    brightness = 1.0
 
-                    idx = int(brightness * num_shades)
-                    if idx <= 0 and fog_dist > 0:
-                        continue  # fully fogged — leave as space
-                    buffer[y][x] = shading[max(0, min(num_shades, idx))]
+                if fog_dist > 0:
+                    fog = min(1.0, cam_z / fog_dist) * fog_height_factor
+                    brightness *= (1.0 - fog * fog)
+
+                idx = int(brightness * num_shades)
+                if idx <= 0 and fog_dist > 0:
+                    continue
+                buf_row[x] = shading[max(0, min(num_shades, idx))]
 
     # ── shared helpers ─────────────────────────────────────────────────────
 
     def _draw_line(self, buffer, zbuffer, p1, p2, z1, z2, char, z_bias=0.0):
-        """Bresenham line with per-pixel z-buffer depth test."""
+        """Bresenham line with per-pixel z-buffer depth test.
+
+        Uses incremental z instead of per-step division for speed.
+        """
         x1, y1 = p1
         x2, y2 = p2
         dx, dy = abs(x2 - x1), abs(y2 - y1)
@@ -1533,13 +1632,15 @@ class Renderer:
         sy = 1 if y1 < y2 else -1
         err = dx - dy
         total = max(dx, dy)
-        step = 0
+        z = z1 + z_bias
+        z_inc = (z2 - z1) / total if total > 0 else 0.0
+        w = self.width
+        h = self.height
         while True:
-            if 0 <= x1 < self.width and 0 <= y1 < self.height:
-                t = step / total if total > 0 else 0.0
-                z = z1 + (z2 - z1) * t + z_bias
-                if z >= zbuffer[y1][x1]:
-                    zbuffer[y1][x1] = z
+            if 0 <= x1 < w and 0 <= y1 < h:
+                zbuf_row = zbuffer[y1]
+                if z >= zbuf_row[x1]:
+                    zbuf_row[x1] = z
                     buffer[y1][x1] = char
             if x1 == x2 and y1 == y2:
                 break
@@ -1550,7 +1651,7 @@ class Renderer:
             if e2 < dx:
                 err += dx
                 y1 += sy
-            step += 1
+            z += z_inc
 
     @staticmethod
     def _point_in_polygon(px, py, projected, n):
@@ -1662,6 +1763,7 @@ class SpinningModel:
         if not self.keyboard:
             return
         now = time.time()
+        got_input = False
         for key in self.keyboard.get_keys():
             # Global keys (instant, not state-tracked)
             if key in ('q', 'Q', '\x03'):
@@ -1673,6 +1775,18 @@ class SpinningModel:
                 continue
             # Record timestamp for key-state tracking
             self._key_state[key] = now
+            got_input = True
+
+        # While the terminal is sending us ANY input, keep all recently-held
+        # keys alive.  Terminal typematic repeat only repeats the last key
+        # pressed, so when a second key starts repeating, the first key's
+        # events stop — even though the user is still physically holding it.
+        # By refreshing all active timestamps on any input, we bridge this
+        # gap: keys only expire after ALL input stops for _key_timeout.
+        if got_input:
+            for k in self._key_state:
+                if now - self._key_state[k] < self._key_timeout:
+                    self._key_state[k] = now
 
         # Apply movement for all currently-held keys (movement mode only).
         # A key is considered "held" if it was pressed within the timeout

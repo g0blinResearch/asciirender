@@ -211,6 +211,7 @@ function startForestMode() {
     turnSpeed = 0.05;
 
     renderer.fogDistance = 12.0 * baseRenderDist;
+    renderer.fogColor = [0.16, 0.18, 0.23];  // match sky horizon colour
     renderer.drawEdges = true;
 
     // Delete model buffers if any
@@ -398,6 +399,8 @@ function renderMoveMode() {
     renderer.setPerspective(fovDeg);
     const viewMatrix = camera.getViewMatrix();
 
+    renderer.drawSky(camera.pitch);
+
     mat4.identity(modelMatrix);
     renderer.fogDistance = 0;
 
@@ -409,6 +412,8 @@ function renderMoveMode() {
 function renderForest() {
     renderer.setPerspective(fovDeg);
     const viewMatrix = camera.getViewMatrix();
+
+    renderer.drawSky(camera.pitch);
 
     mat4.identity(modelMatrix);
 

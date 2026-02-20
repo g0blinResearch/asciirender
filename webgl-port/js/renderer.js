@@ -108,6 +108,57 @@ void main() {
 `;
 
 
+// ── Sky shaders ─────────────────────────────────────────────────────────
+
+const SKY_VERTEX = `
+attribute vec2 aPosition;
+
+varying vec2 vUV;
+
+void main() {
+    vUV = aPosition * 0.5 + 0.5;
+    gl_Position = vec4(aPosition, 0.9999, 1.0);
+}
+`;
+
+const SKY_FRAGMENT = `
+precision mediump float;
+
+uniform float uHorizonY;
+uniform vec3 uSkyColorHigh;
+uniform vec3 uSkyColorLow;
+uniform vec3 uGroundColor;
+
+varying vec2 vUV;
+
+void main() {
+    // vUV.y: 0 = bottom of screen, 1 = top of screen
+    float y = vUV.y;
+    // Convert uHorizonY (0=top, 1=bottom) to bottom-up convention
+    float horizonNorm = 1.0 - uHorizonY;
+
+    if (y < horizonNorm - 0.004) {
+        // Below horizon — ground/fog colour, fading darker further down.
+        // This matches the fog colour so distant geometry blends seamlessly
+        // into the background rather than floating above a dark band.
+        float depth = clamp((horizonNorm - y) / max(horizonNorm, 0.001), 0.0, 1.0);
+        float fade = max(0.3, 1.0 - depth * 0.7);
+        gl_FragColor = vec4(uGroundColor * fade, 1.0);
+    } else if (y < horizonNorm + 0.004) {
+        // Horizon band — brighter
+        float t = smoothstep(horizonNorm - 0.004, horizonNorm + 0.004, y);
+        vec3 col = mix(uGroundColor, uSkyColorLow * 1.4, t);
+        gl_FragColor = vec4(col, 1.0);
+    } else {
+        // Sky above horizon — gradient from horizon colour to zenith
+        float t = clamp((y - horizonNorm) / max(1.0 - horizonNorm, 0.001), 0.0, 1.0);
+        vec3 col = mix(uSkyColorLow, uSkyColorHigh, t);
+        gl_FragColor = vec4(col, 1.0);
+    }
+}
+`;
+
+
 // ── WebGL helper functions ──────────────────────────────────────────────
 
 function compileShader(gl, type, source) {
@@ -203,6 +254,28 @@ export class Renderer {
 
         // For wireframe depth bias
         gl.enable(gl.POLYGON_OFFSET_FILL);
+
+        // ── Sky pass setup ──────────────────────────────────────────────
+        this.skyProg = createProgram(gl, SKY_VERTEX, SKY_FRAGMENT);
+        this.skyUniforms = getUniformLocations(gl, this.skyProg, [
+            'uHorizonY', 'uSkyColorHigh', 'uSkyColorLow', 'uGroundColor',
+        ]);
+        this.skyAttribs = {
+            aPosition: gl.getAttribLocation(this.skyProg, 'aPosition'),
+        };
+
+        // Full-screen quad (two triangles)
+        this._skyQuadBuf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._skyQuadBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+            -1, -1,  1, -1,  -1, 1,
+            -1,  1,  1, -1,   1, 1,
+        ]), gl.STATIC_DRAW);
+
+        // Sky colour palette
+        this.skyColorHigh = [0.04, 0.05, 0.09];  // dark blue-grey zenith
+        this.skyColorLow  = [0.16, 0.18, 0.23];  // brighter at horizon
+        this.groundColor  = [0.17, 0.19, 0.24];  // matches fog colour — seamless blend
     }
 
     resize() {
@@ -284,6 +357,37 @@ export class Renderer {
     beginFrame() {
         const gl = this.gl;
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    }
+
+    /**
+     * Draw a full-screen sky gradient behind all geometry.
+     * @param {number} cameraPitch — camera pitch in radians
+     */
+    drawSky(cameraPitch) {
+        const gl = this.gl;
+
+        gl.useProgram(this.skyProg);
+        gl.depthMask(false);
+        gl.disable(gl.DEPTH_TEST);
+
+        // Horizon Y in normalised screen space [0=top, 1=bottom]
+        // pitch=0 → horizon at 0.5; pitch up → horizon moves down
+        const horizonY = Math.min(1.0, Math.max(0.0,
+            0.5 + Math.tan(cameraPitch) * 0.4));
+
+        gl.uniform1f(this.skyUniforms.uHorizonY, horizonY);
+        gl.uniform3fv(this.skyUniforms.uSkyColorHigh, this.skyColorHigh);
+        gl.uniform3fv(this.skyUniforms.uSkyColorLow, this.skyColorLow);
+        gl.uniform3fv(this.skyUniforms.uGroundColor, this.groundColor);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._skyQuadBuf);
+        gl.enableVertexAttribArray(this.skyAttribs.aPosition);
+        gl.vertexAttribPointer(this.skyAttribs.aPosition, 2, gl.FLOAT, false, 0, 0);
+
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthMask(true);
     }
 
     /**

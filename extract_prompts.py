@@ -73,8 +73,12 @@ FILES_TO_PROCESS: List[FileConfig] = [
         path="opus_kilo_code_task_feb-20-2026_1-12-47-am.md",
         model_label="Opus 4.6",
         session_label="Session 6 - Morning (01:12AM)"
+    ),
+    FileConfig(
+        path="opus_kilo_code_task_feb-20-2026_3-30-15-am.md",
+        model_label="Opus 4.6",
+        session_label="Session 6 - Morning (03:30AM)"
     )
-
 ]
 
 OUTPUT_FILE = "prompt_history.md"
@@ -83,7 +87,7 @@ OUTPUT_FILE = "prompt_history.md"
 # mentions these terms (case-insensitive) will be removed from the output.
 # This is useful for filtering out work that was later undone.
 EXCLUDE_KEYWORDS: List[str] = [
-    "pyramid",
+    "",
 ]
 
 

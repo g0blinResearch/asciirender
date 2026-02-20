@@ -4,7 +4,7 @@
 **Date:** 19 February 2026  
 **Tool:** Kilo Code (VS Code extension)  
 
-This document presents the prompt history across three development sessions,
+This document presents the prompt history across seven development sessions,
 extracted from Kilo Code task history files. Code changes, detailed thinking/
 reasoning text, and raw tool output have been stripped. What remains is the
 sequence of **user prompts** (initial tasks + feedback) and **assistant
@@ -15,10 +15,10 @@ development.
 
 | Metric | Value |
 |--------|-------|
-| Sessions | 6 |
-| Total completion attempts | 68 |
-| Total raw messages | 1,547 |
-| Total tool exchanges | 560 |
+| Sessions | 7 |
+| Total completion attempts | 86 |
+| Total raw messages | 1,763 |
+| Total tool exchanges | 665 |
 
 ## Sessions
 
@@ -28,6 +28,7 @@ development.
 4. [Session 4 - Afternoon (7:34 PM)](#session-4---afternoon-734-pm) — **Opus 4.6** (4 completions)
 5. [Session 5 - Afternoon (10:36 PM)](#session-5---afternoon-1036-pm) — **Opus 4.6** (21 completions)
 6. [Session 6 - Morning (01:12AM)](#session-6---morning-0112am) — **Opus 4.6** (2 completions)
+7. [Session 7 - Morning (03:30AM)](#session-7---morning-0330am) — **Opus 4.6** (18 completions)
 
 ---
 
@@ -1926,6 +1927,435 @@ You'll need to implement the camera, and any projection changes required.
 > - **3D Math**: `Vec3` (dot, normalize, cross, etc.), `Quaternion` (fromAxisAngle, multiply, rotateVector, toMat4), `mat4` (perspective, ortho, multiply, normalMatrix)
 > - **Camera**: `Camera` class with yaw/pitch navigation, `getViewMatrix()` producing column-major 4×4
 > - **Models**: `buildCubeGeometry()`, `buildCarGeometry()`, `buildHouseGeometry()` — all with flat-shaded duplicated vertices + edge indices
+> 
+> *(truncated)*
+
+*✓ Accepted (no further feedback)*
+
+---
+
+
+## Session 7 - Morning (03:30AM)
+
+| Property | Value |
+|----------|-------|
+| **Model** | Opus 4.6 |
+| **Source file** | `opus_kilo_code_task_feb-20-2026_3-30-15-am.md` |
+| **Initial mode** | `code` |
+| **Completion attempts** | 18 |
+| **Tool exchanges** | 105 |
+| **Raw messages** | 216 |
+| **Mode switches** | architect → code → code |
+
+### Initial Task
+
+> Ok,read over README.md, and if you want to prompt_history.md too (this file is pretty large). I'd like you to plan adding a horizon line, with a slightly illuminated (or just brighter) sky backdrop for the world, just to bring it to life a bit more. Plan to apply these changes to both the original Python version in run.py, and the HTML/WebGL port in the webgl-port directory simultaneously.
+
+### Step 1
+
+*(6 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Created the implementation plan at `plans/horizon_sky_plan.md`. Here's a summary of the approach:
+> 
+> ### Python (`run.py`) — 1 file changed
+> - Add a `_fill_sky(buffer, camera)` method to the `Renderer` class that pre-fills the frame buffer with ANSI true-colour sky gradient characters above the computed horizon line
+> - Call it in `_render_perspective()` right after buffer creation (line ~1363), before geometry draws — geometry overwrites sky pixels via the z-buffer
+> - Horizon screen-Y derived from `camera.pitch` and `focal / CHAR_ASPECT`
+> - Uses `·` for sky pixels and `─` for the horizon band, with blue-grey ANSI RGB gradients
+> 
+> ### WebGL (`webgl-port/`) — 2 files changed
+> - Add sky vertex/fragment shaders to `renderer.js` that render a full-screen quad at max depth
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> Increase the brightness of the sky colour in both Python and HTML/JS/WebGL projects by 30%
+
+---
+
+### Step 2
+
+*(7 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Updated all sky colour values in `plans/horizon_sky_plan.md` with a 30% brightness increase across both Python and WebGL implementations:
+> 
+> **Python ANSI RGB (original → +30%):**
+> - Zenith: `8, 10, 18` → `10, 13, 23`
+> - Horizon sky gradient endpoint: `33, 40, 53` → `43, 52, 69`
+> - Horizon band: `45, 50, 60` → `59, 65, 78`
+> 
+> **WebGL normalised (original → +30%):**
+> - Zenith: `0.03, 0.04, 0.07` → `0.04, 0.05, 0.09`
+> - Horizon: `0.12, 0.14, 0.18` → `0.16, 0.18, 0.23`
+> - Ground: `0.02, 0.02, 0.02` → `0.03, 0.03, 0.03`
+> - Fog target updated to match: `0.16, 0.18, 0.23`
+> 
+> All four locations where colours are specified in the plan (Python code snippet, WebGL constructor snippet, fog colour snippet, and the summary table) have been updated consistently.
+
+**💬 User Feedback:**
+
+> Neither on the Python version, nor on the Html version do we see a bright sky backdrop. See the attached screenshots
+
+---
+
+### Step 3
+
+*(18 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Implemented the horizon line and sky backdrop in both codebases. All syntax checks pass.
+> 
+> ### Python (`run.py`) — changes:
+> - Added `_fill_sky(buffer, camera)` method to the `Renderer` class — computes horizon screen-Y from `camera.pitch`, fills rows above horizon with an ANSI true-colour gradient (`·` dots) going from dark blue-grey (RGB 10,13,23 at zenith) to brighter (43,52,69 near horizon), with a `─` horizon band (59,65,78)
+> - Called `self._fill_sky(buffer, camera)` in `_render_perspective()` right after buffer creation, before geometry — geometry overwrites sky via z-buffer
+> 
+> ### WebGL (`webgl-port/`) — changes:
+> - Added `SKY_VERTEX` and `SKY_FRAGMENT` shaders to `renderer.js` — full-screen quad with vertical gradient: dark zenith → brighter horizon band → dark ground below
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> Ok, better.. but one issue. Look at the first screenshot, we see the horizon, and the sky above, right? How come after we look up, the horizon moves up with us and the sky shrinks? It seems we have a very similar issue on the HTML/JS/WebGL version too.
+
+---
+
+### Step 4
+
+*(4 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Fixed the inverted horizon direction in both versions. The bug was that when the camera pitches up, the horizon was moving **up** instead of **down**.
+> 
+> ### Root causes and fixes:
+> 
+> **Python (`run.py`)**: The horizon screen-Y formula had the wrong sign. Changed from:
+> 
+> to:
+> 
+> When `pitch > 0` (looking up), `tan(pitch)` is positive, so `horizon_y > scy` → horizon drops below screen centre. The edge case fallback was also flipped (`h` when looking up, `0` when looking down).
+> 
+> **WebGL (`renderer.js`)**: The fragment shader had `float y = 1.0 - vUV.y` which inverted the Y axis, swapping the sky and ground regions. Changed to:
+> 
+> Now `y < horizonNorm` correctly maps to the bottom of the screen (ground) and `y > horizonNorm` maps to the top (sky).
+> 
+> *(truncated)*
+
+*✓ Accepted (no further feedback)*
+
+---
+
+### Step 5
+
+**✅ Completion Result:**
+
+> Fixed the inverted horizon direction in both versions. The bug was that when the camera pitches up, the horizon was moving **up** instead of **down**.
+> 
+> ### Root causes and fixes:
+> 
+> **Python (`run.py`)**: The horizon screen-Y formula had the wrong sign. Changed from:
+> 
+> to:
+> 
+> When `pitch > 0` (looking up), `tan(pitch)` is positive, so `horizon_y > scy` → horizon drops below screen centre. The edge case fallback was also flipped (`h` when looking up, `0` when looking down).
+> 
+> **WebGL (`renderer.js`)**: The fragment shader had `float y = 1.0 - vUV.y` which inverted the Y axis, swapping the sky and ground regions. Changed to:
+> 
+> Now `y < horizonNorm` correctly maps to the bottom of the screen (ground) and `y > horizonNorm` maps to the top (sky).
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> Ok that's looking really good, but there's one issue.. when we look down far enough, the moutains in the distance seem to float above the horizon line, like you can see in this screenshot from the HTML/JS/WebGL version. As before, apply all fixes to both Python and WebGL versions at the same time. Keep it all aligned!
+> 
+> In the first screenshot, you see a mountain in the distance. In the second after we have looked down, you can see the island and elements are floating above the horizon.
+
+---
+
+### Step 6
+
+*(9 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Fixed the floating geometry issue in both versions by filling the below-horizon area with the fog/ground colour instead of near-black.
+> 
+> ### Root Cause
+> The sky backdrop previously left everything below the horizon as dark/black. When the camera pitches down, the horizon moves up and distant 3D geometry (mountains, trees) that's fogged to the horizon colour appears against this dark background — creating the visual illusion of "floating" above the horizon.
+> 
+> ### Python fix — `_fill_sky()`
+> - Removed the `break` at `y > horizon_y + 1` that stopped filling below the horizon
+> - Added an `else` branch that fills below-horizon rows with the fog/ground colour `(43, 48, 60)` RGB
+> - The ground colour gradually fades darker further below the horizon (`fade = max(0.3, 1.0 - below / (h * 0.8))`)
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> Ok so I think the main issue is that when rendering a distant mountain, we do not render the ground leading to it until we get closer, which results in that "floating" effect, as you can see below in this WebGL screenshot. Fix this, and remember fix both WebGL and Python the same way
+
+---
+
+### Step 7
+
+*(10 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Fixed the floating mountain issue in both Python and WebGL versions by adding an **intermediate terrain loading tier**.
+> 
+> ### Root Cause
+> The chunk loading system had two tiers:
+> 1. **Full detail** (objects + terrain) within `render_distance` (~2 chunks = 24 world units)
+> 2. **Mountain-only** chunks at extended range (`mtn_rd` = 16 chunks) — but ONLY where `chunk_has_mountain()` returned true
+> 
+> This left a **gap** where no terrain was loaded between the nearby detail chunks and distant mountain chunks. Mountains appeared to float because there was no connecting ground geometry.
+> 
+> ### Fix: Three-tier chunk loading
+> 
+> Added a new intermediate tier that loads **all** chunks as terrain-only between `rd` and `terrain_rd`:
+> 
+> **Python** — `ForestWorld.update()`:
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> Looking better, but we're still seeing some holes in the ground. How can this be fixed? Extending the view / render distance is an option I suppose? Anything else?
+
+---
+
+### Step 8
+
+*(10 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Applied matching terrain gap fixes to both versions:
+> 
+> **Python `run.py`** — `ForestWorld.update()`:
+> - Moved `mtn_rd = max(16, rd * 3)` before the Tier 2 section (was previously referenced before definition)
+> - Changed `terrain_rd` from `max(8, rd * 2)` to `mtn_rd` so intermediate terrain covers the full range to mountains
+> - Increased `terrain_max` from 6 to 24 per frame (terrain-only chunks are lightweight — 9 quads each)
+> 
+> **WebGL `forest.js`** — `ForestWorld.update()`:
+> - Moved `const mtnRd = Math.max(16, rd * 3)` before the Tier 2 section  
+> - Changed `terrainRd` from `Math.max(8, rd * 2)` to `mtnRd`
+> - Increased `terrainMax` from 6 to 24
+> 
+> Both files pass syntax validation.
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> Ok very good. One change for the Python version. Do not fill in the sky with dots, just leave it dark. I think filling it in is taking up a lot of cycles in the python rendering. Remember, only update the python script. This doesn't impact the html once
+
+---
+
+### Step 9
+
+*(4 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Updated `_fill_sky()` in the Python version to skip the sky area above the horizon entirely — those rows now `continue` without writing any ANSI characters, leaving them as plain spaces (dark terminal background). This eliminates the per-pixel ANSI string generation for the entire sky portion of the screen.
+> 
+> The horizon band (thin `─` line) and the ground/fog colour below the horizon are preserved, since those are important for visual blending with distant terrain geometry.
+> 
+> Only `run.py` was modified; the WebGL version is unaffected as requested.
+
+**💬 User Feedback:**
+
+> Hmmm.. the FPS in the Python version has dropped significantly. Analyse the Python version, and determine where the FPS drop may be coming from.
+
+---
+
+### Step 10
+
+*(3 tool exchanges)*
+
+**✅ Completion Result:**
+
+> ## Python FPS Drop Analysis
+> 
+> The FPS drop is caused by the recent change setting `terrain_rd = mtn_rd` in `ForestWorld.update()`. Here's the quantified impact:
+> 
+> ### The Problem: 4× Terrain Chunk Explosion
+> 
+> With default `rd = 2`, `mtn_rd = max(16, rd * 3) = 16`:
+> 
+> | Metric | Before (`terrain_rd = 8`) | After (`terrain_rd = 16`) | Factor |
+> |--------|---------------------------|---------------------------|--------|
+> | Terrain-only chunks | `(2×8+1)² − (2×2+1)² = 264` | `(2×16+1)² − (2×2+1)² = 1,064` | **4×** |
+> | Terrain wireframe faces | `264 × 9 = 2,376` | `1,064 × 9 = 9,576` | **4×** |
+> | Bresenham edge draws | `2,376 × 4 = 9,504` | `9,576 × 4 = 38,304` | **4×** |
+> 
+> ### Where Time Is Spent
+> 
+> 1. **`get_face_data()`** — iterates over 1,100+ chunk dict entries every frame.
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> Ok, apply your suggested fixes for the Python script.
+
+---
+
+### Step 11
+
+*(7 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Applied three performance fixes to `run.py` (and matching WebGL changes to `forest.js`):
+> 
+> ### Fix 1: Reduced `terrain_rd` from `mtn_rd` (16) to `max(8, rd * 3)` (8 at default rd=2)
+> - **`run.py:957`**: `terrain_rd = max(8, rd * 3)` — drops terrain-only chunks from 1,064 back to 264 (4× reduction)
+> - **`forest.js:331`**: `const terrainRd = Math.max(8, rd * 3)` — matching change
+> 
+> ### Fix 2: Reduced `terrain_max` loading budget from 24 to 8 per frame
+> - **`run.py:1004`**: `terrain_max = 8` — fewer noise evaluations per loading frame
+> - **`forest.js:391`**: `const terrainMax = 8` — matching change
+> 
+> ### Fix 3: Pre-computed ground-fill ANSI strings in `_fill_sky()`
+> - Horizon band: pre-computed `horizon_ansi` string, filled via `[horizon_ansi] * w` (list multiplication vs per-pixel loop)
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> Let's remove the whole hroizon line from the Python version for now I think. Let's see how that impacts performance.
+
+---
+
+### Step 12
+
+*(3 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Removed the entire horizon/sky fill from the Python version. `_fill_sky()` is now a no-op (`pass`) — no horizon line, no ground colour, no ANSI string generation at all. The method is still called from `_render_perspective()` but does nothing, so the buffer stays as plain spaces.
+> 
+> This eliminates all the per-frame ANSI string overhead that was filling below-horizon rows. The WebGL version retains its full sky gradient shader unchanged.
+
+**💬 User Feedback:**
+
+> That helped a lot I think, so let's proceed to clean up the Python script.
+
+---
+
+### Step 13
+
+*(4 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Cleaned up `run.py` — removed the dead `_fill_sky()` method entirely (was a no-op `pass`) along with its `# ── sky / horizon backdrop` section header, and removed the call site at what was line 1406 (`self._fill_sky(buffer, camera)`) inside `_render_perspective()`. Python syntax validates cleanly.
+> 
+> The WebGL version retains its full sky gradient shader in `renderer.js` — only the Python terminal renderer had the sky/horizon feature removed for performance.
+
+*✓ Accepted (no further feedback)*
+
+---
+
+### Step 14
+
+**✅ Completion Result:**
+
+> Cleaned up `run.py` — removed the dead `_fill_sky()` method entirely (was a no-op `pass`) along with its `# ── sky / horizon backdrop` section header, and removed the call site at what was line 1406 (`self._fill_sky(buffer, camera)`) inside `_render_perspective()`. Python syntax validates cleanly.
+> 
+> The WebGL version retains its full sky gradient shader in `renderer.js` — only the Python terminal renderer had the sky/horizon feature removed for performance.
+
+**💬 User Feedback:**
+
+> Ok, any other performance improvements we can make to the Python script without adversley impacting how it looks / feels?
+
+---
+
+### Step 15
+
+*(12 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Applied five performance optimizations to the Python renderer in `run.py` — all producing identical visual output:
+> 
+> ### 1. Scanline rasterizer — `_draw_face_lit_persp()`
+> Replaced the **bounding-box + point-in-polygon** fill approach with **edge-intersection scanline traversal**. Instead of testing every pixel in the bounding box with `_point_in_polygon()` (O(bbox_area × n_verts)), the new code computes exact left/right x boundaries per scanline by intersecting polygon edges (O(bbox_height × n_edges + filled_pixels)). For a typical 3–4 vertex face, this eliminates 70–85% of inner-loop iterations. Row references (`buf_row`, `zbuf_row`) are cached per scanline to avoid repeated list indexing.
+> 
+> ### 2. Inlined camera transforms — `_render_perspective()`
+> 
+> *(truncated)*
+
+*✓ Accepted (no further feedback)*
+
+---
+
+### Step 16
+
+**✅ Completion Result:**
+
+> Applied five performance optimizations to the Python renderer in `run.py` — all producing identical visual output:
+> 
+> ### 1. Scanline rasterizer — `_draw_face_lit_persp()`
+> Replaced the **bounding-box + point-in-polygon** fill approach with **edge-intersection scanline traversal**. Instead of testing every pixel in the bounding box with `_point_in_polygon()` (O(bbox_area × n_verts)), the new code computes exact left/right x boundaries per scanline by intersecting polygon edges (O(bbox_height × n_edges + filled_pixels)). For a typical 3–4 vertex face, this eliminates 70–85% of inner-loop iterations. Row references (`buf_row`, `zbuf_row`) are cached per scanline to avoid repeated list indexing.
+> 
+> ### 2. Inlined camera transforms — `_render_perspective()`
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> On the Python version, when we are moving, if we were say holding down the up arrow to move forward, an then pressed the left arrow to turn.. as soon as we're done turning, we stop moving forward. How can we handle this multi key input scenario cleanly and efficiently?
+
+---
+
+### Step 17
+
+*(6 tool exchanges)*
+
+**✅ Completion Result:**
+
+> Fixed multi-key input handling in `_handle_input()` in the Python version.
+> 
+> **Root cause**: Unix terminals only typematic-repeat the *last key pressed*. When you hold UP (forward) then press LEFT (turn), the terminal stops sending UP events. After `_key_timeout` (0.25s) with no UP events, forward movement drops out.
+> 
+> **Fix**: After processing all new keys, if any input was received this frame, refresh the timestamps of ALL currently-held keys:
+> 
+> **How it works**:
+> 1. Hold UP → UP timestamp keeps refreshing via typematic repeat
+> 2. Press LEFT while holding UP → terminal switches to repeating LEFT; LEFT events arrive and refresh ALL active keys (including UP) → UP stays alive
+> 3.
+> 
+> *(truncated)*
+
+**💬 User Feedback:**
+
+> Honestly that didn't really help at all. Do you have any other ideas, or should we just submit to the fact that we can only track a single key down up state at once for the Python version?
+
+---
+
+### Step 18
+
+*(2 tool exchanges)*
+
+**✅ Completion Result:**
+
+> This is a fundamental limitation of Unix terminal input that cannot be fully solved at the application level.
+> 
+> **The core issue**: Terminal typematic repeat only repeats the **last key pressed**. When you hold UP and press LEFT, the terminal stops sending UP events entirely. When LEFT is released, most terminals do **NOT** resume UP repeat — they produce silence on stdin. The app sees identical input whether UP was released or is still held-but-not-repeating.
+> 
+> **What the refresh-on-input fix does help**: While LEFT is actively repeating (during the turn), UP stays alive because each LEFT event refreshes UP's timestamp. So simultaneous forward+turn works during the dual-hold. The unfixable part is after LEFT release — no stdin data means no way to know UP is still held.
 > 
 > *(truncated)*
 

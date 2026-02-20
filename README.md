@@ -10,7 +10,9 @@ The bulk of the development — planning, initial implementation, projection fix
 
 The project was then **extended significantly with [Claude Opus 4.6](https://www.anthropic.com/claude)** across three sessions (262 tool exchanges, 43 completion cycles), which handled: distortion analysis, quaternion-based rotation, auto-fit scaling, a new per-pixel lighting system, additional models (car, house scene), occlusion/culling fixes, documentation, free camera navigation with perspective projection, and a full procedural infinite forest world with terrain, mountains, and distance fog.
 
-Finally, the entire Python terminal renderer was **ported to HTML/JavaScript/WebGL** in a single Opus 4.6 session (42 tool exchanges, 2 completion cycles). This session analyzed all 22 subsystems in `run.py`, created a detailed architecture plan, then implemented 9 ES modules plus HTML/CSS — translating the CPU-based ASCII rasterizer into GPU-accelerated WebGL with GLSL shaders for lighting, fog, and wireframe rendering.
+The entire Python terminal renderer was then **ported to HTML/JavaScript/WebGL** in a single Opus 4.6 session (42 tool exchanges, 2 completion cycles). This session analyzed all 22 subsystems in `run.py`, created a detailed architecture plan, then implemented 9 ES modules plus HTML/CSS — translating the CPU-based ASCII rasterizer into GPU-accelerated WebGL with GLSL shaders for lighting, fog, and wireframe rendering.
+
+Most recently, a **sky/horizon backdrop and rendering optimisation** session (105 tool exchanges, 18 completion cycles) added a gradient sky shader to the WebGL port, implemented three-tier chunk loading (full detail → terrain-only → mountain-only) to eliminate visual gaps between nearby and distant terrain, and applied five performance optimisations to the Python renderer: scanline rasteriser, inlined camera transforms, single-pass vertex projection, incremental z-interpolation in line drawing, and a fog-faded edge string cache.
 
 | Phase | Model | Sessions | Steps | Tool Exchanges | Description |
 |-------|-------|----------|-------|----------------|-------------|
@@ -19,9 +21,10 @@ Finally, the entire Python terminal renderer was **ported to HTML/JavaScript/Web
 | Camera & movement | Opus 4.6 | 1 | 4 | 29 | Free camera, perspective projection, key-state tracking, FOV config |
 | Forest & terrain | Opus 4.6 | 1 | 21 | 144 | Infinite forest, terrain noise, mountains, distance fog, colour fading |
 | WebGL port | Opus 4.6 | 1 | 2 | 42 | Full HTML/JS/WebGL port of the Python terminal renderer |
-| **Total** | | **6** | **68** | **560** | |
+| Sky & optimisations | Opus 4.6 | 1 | 18 | 105 | WebGL sky shader, three-tier chunk loading, Python renderer optimisations |
+| **Total** | | **7** | **86** | **665** | |
 
-📋 **[Full prompt history →](prompt_history.md)** — every user prompt and assistant completion across all 6 sessions, extracted from the raw task logs.
+📋 **[Full prompt history →](prompt_history.md)** — every user prompt and assistant completion across all 7 sessions, extracted from the raw task logs.
 
 ## Requirements
 
@@ -36,7 +39,8 @@ Finally, the entire Python terminal renderer was **ported to HTML/JavaScript/Web
 | Cube | [![asciicast](https://asciinema.org/a/oKZXRAfmjrFImdfE.svg)](https://asciinema.org/a/oKZXRAfmjrFImdfE) |
 | Car | [![asciicast](https://asciinema.org/a/YYQU4E8z3ssmdCUO.svg)](https://asciinema.org/a/YYQU4E8z3ssmdCUO) |
 | House | [![asciicast](https://asciinema.org/a/pxwMuETRzf91jQm5.svg)](https://asciinema.org/a/pxwMuETRzf91jQm5) |
-| Forest | [![asciicast](https://asciinema.org/a/FkN6ZmarYAWlxQ1N)](https://asciinema.org/a/FkN6ZmarYAWlxQ1N) |
+| Forest | [![asciicast](https://asciinema.org/a/FkN6ZmarYAWlxQ1N.svg)](https://asciinema.org/a/FkN6ZmarYAWlxQ1N) |
+| WebGL Port | [![WebGL Port](https://img.youtube.com/vi/6YKX-42oFKo/maxresdefault.jpg)](https://www.youtube.com/watch?v=6YKX-42oFKo) |
 
 ## Quick Start
 
@@ -77,6 +81,7 @@ http://localhost:8080/?move&fov=110       # move mode with wider FOV
 
 | Feature | Python (terminal) | WebGL Port |
 |---------|-------------------|------------|
+| Sky / horizon | — (removed for perf) | GLSL gradient shader + fullscreen quad |
 | Rasterization | CPU scanline + z-buffer | GPU hardware |
 | Clipping | Sutherland-Hodgman CPU | GPU native |
 | Edges | Bresenham line drawing | `GL_LINES` with depth bias |
@@ -126,7 +131,7 @@ python3 run.py --forest --fov 110              # wider field of view
 
 **Features:**
 - **Procedural generation** — deterministic seeded RNG; same seed = same world
-- **Chunk streaming** — 12×12 world-unit chunks load/unload around the camera
+- **Three-tier chunk streaming** — 12×12 world-unit chunks: full detail nearby, terrain-only at mid-range, mountain-only at far range
 - **Multi-tier pine trees** — 3-layer canopy with trunk (16 faces each)
 - **Terrain** — two-octave smoothed value noise for rolling hills and valleys
 - **Mountains** — rare, very large peaks via low-frequency noise with cubic power curve
@@ -135,6 +140,7 @@ python3 run.py --forest --fov 110              # wider field of view
 - **Height-based fog** — mountain terrain wireframe stays visible above the fog layer
 - **Dynamic render distance** — see further from mountaintops (auto-expands chunk range)
 - **Extended mountain loading** — mountain chunks load as terrain-only wireframe at 3× normal range
+- **Sky backdrop** (WebGL only) — gradient sky shader with horizon band; fog colour matched to horizon for seamless blending
 
 ## Models
 
@@ -241,7 +247,9 @@ run.py
 | **Distance fog** | Per-pixel quadratic fade; fully fogged pixels skipped for performance |
 | **Height-based fog** | Mountain terrain wireframe gets reduced fog so peaks remain visible at range |
 | **Procedural terrain** | Two-octave value noise (rolling hills) + low-frequency mountain layer |
-| **Chunk streaming** | Load/unload 12×12 world-unit chunks around camera; 8 mountain chunks/frame budget |
+| **Scanline rasteriser** | Edge-intersection traversal replacing bounding-box + point-in-polygon (Python) |
+| **Chunk streaming** | Three-tier loading: full detail, terrain-only, mountain-only; 8 chunks/frame budget |
+| **Sky gradient** | Fullscreen quad GLSL shader with zenith→horizon→ground gradient (WebGL only) |
 | **Camera tracking** | Camera Y follows terrain height; dynamic render distance from elevation |
 
 ### How It Works
@@ -261,8 +269,8 @@ run.py
 
 ```
 m25test/
-├── run.py                                           # Python terminal renderer (~1830 lines)
-├── webgl-port/                                      # HTML/JS/WebGL port (Session 6)
+├── run.py                                           # Python terminal renderer (~1965 lines)
+├── webgl-port/                                      # HTML/JS/WebGL port (Sessions 6–7)
 │   ├── index.html                                   # Canvas + HUD overlay
 │   ├── css/style.css                                # Dark theme, green accent
 │   └── js/
