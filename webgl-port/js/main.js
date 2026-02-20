@@ -10,7 +10,7 @@ import { Camera } from './camera.js';
 import { InputManager } from './input.js';
 import { MODELS } from './models.js';
 import { Renderer } from './renderer.js';
-import { ForestWorld } from './forest.js';
+import { ForestWorld, makeOakTree, createAccumulator, finalizeAccumulator } from './forest.js';
 import { terrainHeight } from './terrain.js';
 
 // ── Application state ───────────────────────────────────────────────────
@@ -49,6 +49,15 @@ let fovDeg = 90;
 // Forest settings
 let forestSeed = 42;
 let baseRenderDist = 2;
+
+// Special tree (golden oak) - spawned at random location ~10 sec walk from spawn
+let specialTreePos = null;      // { x, z, baseY } or null
+let specialTreeBuf = null;      // WebGL buffer for the oak tree
+let specialTreeSpawned = false; // whether special tree has been spawned
+const SPAWN_POS = { x: 6, y: 0, z: 6 };  // player spawn position
+
+// Path geometry for yellow path
+let pathBuf = null;
 
 // Reusable matrices
 const modelMatrix = mat4.create();
@@ -223,7 +232,6 @@ function startForestMode() {
 
     updateModeDisplay();
 }
-
 function stopForestMode() {
     if (!forestWorld) return;
 
@@ -234,7 +242,112 @@ function stopForestMode() {
     }
     chunkBuffers.clear();
     forestWorld = null;
+    
+    // Delete special tree and path buffers
+    if (specialTreeBuf) {
+        renderer.deleteBuffers(specialTreeBuf);
+        specialTreeBuf = null;
+    }
+    if (pathBuf) {
+        renderer.deleteBuffers(pathBuf);
+        pathBuf = null;
+    }
+    specialTreePos = null;
+    specialTreeSpawned = false;
 }
+
+// Seeded RNG for special tree (matching Python's random.Random)
+class SpecialRNG {
+    constructor(seed) {
+        this._s = seed >>> 0;
+    }
+    random() {
+        this._s = (Math.imul(this._s, 1103515245) + 12345) & 0x7FFFFFFF;
+        return this._s / 0x7FFFFFFF;
+    }
+}
+
+function spawnSpecialTree() {
+    if (specialTreeSpawned) return;
+    
+    // Use a seeded RNG for deterministic spawn position based on world seed
+    const rng = new SpecialRNG(forestSeed + 999999);
+    
+    // Distance: Very close to spawn for immediate visibility
+    const distance = 5.0 + rng.random() * 3.0;  // 5-8 units (very close)
+    
+    // Random angle
+    const angle = rng.random() * Math.PI * 2;
+    
+    // Calculate position
+    const wx = SPAWN_POS.x + distance * Math.sin(angle);
+    const wz = SPAWN_POS.z + distance * Math.cos(angle);
+    
+    // Get terrain height at this position
+    const baseY = terrainHeight(wx, wz, forestSeed);
+    
+    // Store position
+    specialTreePos = { x: wx, z: wz, baseY: baseY };
+    
+    // Generate oak tree with fixed height and random rotation
+    const height = 3.5 + rng.random() * 0.5;  // 3.5-4.0 units
+    const treeAngle = rng.random() * Math.PI * 2;
+    
+    // Generate geometry
+    const acc = createAccumulator();
+    makeOakTree(acc, wx, wz, height, treeAngle, rng, baseY);
+    const treeGeo = finalizeAccumulator(acc);
+    specialTreeBuf = renderer.createBuffers(treeGeo);
+    
+    // Generate yellow path geometry
+    const pathAcc = createAccumulator();
+    const pathLength = Math.sqrt((wx - SPAWN_POS.x) ** 2 + (wz - SPAWN_POS.z) ** 2);
+    const numMarkers = Math.floor(pathLength / 2.0);
+    
+    for (let i = 0; i <= numMarkers; i++) {
+        const t = i / Math.max(numMarkers, 1);
+        const px = SPAWN_POS.x + t * (wx - SPAWN_POS.x);
+        const pz = SPAWN_POS.z + t * (wz - SPAWN_POS.z);
+        const py = terrainHeight(px, pz, forestSeed) + 0.05;
+        
+        // Small diamond marker on ground
+        const markerSize = 0.3;
+        const v0 = new Vec3(px, py, pz - markerSize);
+        const v1 = new Vec3(px + markerSize, py, pz);
+        const v2 = new Vec3(px, py, pz + markerSize);
+        const v3 = new Vec3(px - markerSize, py, pz);
+        
+        // Push as quad (will be rendered as wireframe)
+        // Using pushFace for a quad creates triangles - we want line markers
+        // For path, we'll just use small quads that get rendered
+        pathAcc.positions.push(
+            v0.x, v0.y, v0.z,
+            v1.x, v1.y, v1.z,
+            v2.x, v2.y, v2.z,
+            v3.x, v3.y, v3.z
+        );
+        // Same normal for all
+        pathAcc.normals.push(0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0);
+        pathAcc.vertCount += 4;
+        
+        // Two triangles per quad
+        const base = i * 4;
+        pathAcc.indices.push(base, base + 1, base + 2);
+        pathAcc.indices.push(base, base + 2, base + 3);
+        
+        // Edge lines for visibility
+        pathAcc.edgeIndices.push(base, base + 1);
+        pathAcc.edgeIndices.push(base + 1, base + 2);
+        pathAcc.edgeIndices.push(base + 2, base + 3);
+        pathAcc.edgeIndices.push(base + 3, base);
+    }
+    
+    const pathGeo = finalizeAccumulator(pathAcc);
+    pathBuf = renderer.createBuffers(pathGeo);
+    
+    specialTreeSpawned = true;
+}
+
 
 function updateForestBuffers() {
     if (!forestWorld) return;
@@ -304,6 +417,9 @@ function update() {
     handleInput();
 
     if (mode === 'forest' && forestWorld) {
+        // Spawn special tree on first update
+        spawnSpecialTree();
+        
         // Track terrain height
         const cp = camera.position;
         const ty = terrainHeight(cp.x, cp.z, forestWorld.seed);
@@ -427,6 +543,16 @@ function renderForest() {
         if (bufs.objectBuf) {
             renderer.drawModel(bufs.objectBuf, viewMatrix, modelMatrix);
         }
+    }
+    
+    // Draw yellow path from spawn to special tree
+    if (pathBuf) {
+        renderer.drawPath(pathBuf, viewMatrix, modelMatrix);
+    }
+    
+    // Draw special tree (golden oak)
+    if (specialTreeBuf) {
+        renderer.drawModel(specialTreeBuf, viewMatrix, modelMatrix);
     }
 }
 

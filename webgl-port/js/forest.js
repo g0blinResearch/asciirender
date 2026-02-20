@@ -65,11 +65,11 @@ function pushFace(acc, verts) {
     }
 }
 
-function createAccumulator() {
+export function createAccumulator() {
     return { positions: [], normals: [], indices: [], edgeIndices: [], vertCount: 0 };
 }
 
-function finalizeAccumulator(acc) {
+export function finalizeAccumulator(acc) {
     return {
         positions: new Float32Array(acc.positions),
         normals: new Float32Array(acc.normals),
@@ -175,6 +175,77 @@ function makeBush(acc, wx, wz, scale, angle, rng, baseY = 0.0) {
     for (let i = 0; i < 4; i++) {
         const j = (i + 1) % 4;
         pushFace(acc, [base[i], base[j], apex]);
+    }
+}
+
+
+// ── Oak tree (special golden tree) ─────────────────────────────────────────
+
+/**
+ * Generate geometry for a broadleaf oak tree at world position (wx, wz).
+ * Creates a distinctive golden oak silhouette quite different from pine trees.
+ *
+ * @param {Object} acc - Accumulator object with positions, normals, indices, edgeIndices
+ * @param {number} wx - World X position
+ * @param {number} wz - World Z position
+ * @param {number} height - Tree height
+ * @param {number} angle - Rotation angle around Y axis
+ * @param {SeededRNG} rng - Random number generator
+ * @param {number} baseY - Base Y position (terrain height)
+ */
+export function makeOakTree(acc, wx, wz, height, angle, rng, baseY = 0.0) {
+    const ca = Math.cos(angle), sa = Math.sin(angle);
+
+    // Trunk dimensions — thicker than pine
+    const tw = 0.15;              // trunk half-width (0.15 vs 0.10 for pine)
+    const th = height * 0.45;     // trunk height (45% of total)
+
+    // Trunk: 4 vertical side quads
+    const trunkVerts = [];
+    for (const [lx, lz] of [[-tw, -tw], [tw, -tw], [tw, tw], [-tw, tw]]) {
+        const [rx, rz] = rotateY(lx, lz, ca, sa);
+        trunkVerts.push([
+            new Vec3(wx + rx, baseY, wz + rz),
+            new Vec3(wx + rx, baseY + th, wz + rz),
+        ]);
+    }
+    for (let i = 0; i < 4; i++) {
+        const j = (i + 1) % 4;
+        const [b0, t0] = trunkVerts[i];
+        const [b1, t1] = trunkVerts[j];
+        pushFace(acc, [b0, b1, t1, t0]);
+    }
+
+    // Canopy — large rounded sphere approximation (icosphere-like, 8 faces)
+    const canopyCenterY = baseY + th + height * 0.35;
+    const canopyRadius = height * 0.45;
+
+    // Create 8 triangular faces approximating a sphere
+    const topVerts = [];
+    for (const [lx, lz] of [
+        [-canopyRadius * 0.7, -canopyRadius * 0.7],
+        [canopyRadius * 0.7, -canopyRadius * 0.7],
+        [canopyRadius * 0.7, canopyRadius * 0.7],
+        [-canopyRadius * 0.7, canopyRadius * 0.7]
+    ]) {
+        const [rx, rz] = rotateY(lx, lz, ca, sa);
+        topVerts.push(new Vec3(wx + rx, canopyCenterY, wz + rz));
+    }
+
+    // Apex
+    const apex = new Vec3(wx, baseY + th + canopyRadius * 1.1, wz);
+
+    // 4 triangular faces from base to apex
+    for (let i = 0; i < 4; i++) {
+        const j = (i + 1) % 4;
+        pushFace(acc, [topVerts[i], topVerts[j], apex]);
+    }
+
+    // 4 triangular faces forming the bottom of the canopy
+    const bottomApex = new Vec3(wx, canopyCenterY - canopyRadius * 0.5, wz);
+    for (let i = 0; i < 4; i++) {
+        const j = (i + 1) % 4;
+        pushFace(acc, [topVerts[j], topVerts[i], bottomApex]);
     }
 }
 

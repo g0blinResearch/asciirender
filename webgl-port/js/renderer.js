@@ -494,4 +494,22 @@ export class Renderer {
         // Then wireframe edges in sage green
         this.drawWireframe(buf, viewMatrix, modelMatrix, this.terrainEdgeColor);
     }
+    
+    /**
+     * Draw yellow path markers from spawn to special tree.
+     * Uses golden/yellow color for the path.
+     */
+    drawPath(buf, viewMatrix, modelMatrix) {
+        if (!buf || buf.edgeIndexCount === 0) return;
+        
+        // Yellow/golden path color
+        const pathColor = [1.0, 0.85, 0.2];
+        
+        // Draw path fill and wireframe
+        const gl = this.gl;
+        gl.disable(gl.CULL_FACE);
+        this.drawFill(buf, viewMatrix, modelMatrix);
+        this.drawWireframe(buf, viewMatrix, modelMatrix, pathColor);
+        gl.enable(gl.CULL_FACE);
+    }
 }

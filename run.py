@@ -600,6 +600,75 @@ def make_bush(wx, wz, scale, angle, rng, base_y=0.0):
     return faces
 
 
+def make_oak_tree(wx, wz, height, angle, rng, base_y=0.0):
+    r"""Generate face data for a broadleaf oak tree at world position (wx, base_y, wz).
+
+    Returns a list of (verts, center, normal) tuples.
+
+    Geometry: 4-quad trunk + single large rounded canopy (sphere-like, 8 triangular faces).
+    This creates a distinctive golden oak silhouette quite different from pine trees.
+
+    ::
+
+              _______
+             /       \        ← Canopy (sphere approximation)
+            /_________\
+               ||||           ← Trunk
+               ||
+    """
+    faces = []
+    ca, sa = math.cos(angle), math.sin(angle)
+
+    # Trunk dimensions — thicker than pine
+    tw = 0.15                   # trunk half-width (0.15 vs 0.10 for pine)
+    th = height * 0.45          # trunk height (45% of total)
+
+    # Trunk: 4 vertical side quads
+    trunk_verts = []
+    for lx, lz in [(-tw, -tw), (tw, -tw), (tw, tw), (-tw, tw)]:
+        rx, rz = _rotate_y(lx, lz, ca, sa)
+        trunk_verts.append((
+            Vec3(wx + rx, base_y, wz + rz),
+            Vec3(wx + rx, base_y + th, wz + rz),
+        ))
+
+    for i in range(4):
+        j = (i + 1) % 4
+        b0, t0 = trunk_verts[i]
+        b1, t1 = trunk_verts[j]
+        faces.append(_make_face([b0, b1, t1, t0]))
+
+    # Canopy — large rounded sphere approximation (icosphere-like, 8 faces)
+    canopy_center_y = base_y + th + height * 0.35
+    canopy_radius = height * 0.45
+
+    # Create 8 triangular faces approximating a sphere
+    # Top face
+    top_verts = []
+    for lx, lz in [(-canopy_radius * 0.7, -canopy_radius * 0.7),
+                   (canopy_radius * 0.7, -canopy_radius * 0.7),
+                   (canopy_radius * 0.7, canopy_radius * 0.7),
+                   (-canopy_radius * 0.7, canopy_radius * 0.7)]:
+        rx, rz = _rotate_y(lx, lz, ca, sa)
+        top_verts.append(Vec3(wx + rx, canopy_center_y, wz + rz))
+
+    # Apex
+    apex = Vec3(wx, base_y + th + canopy_radius * 1.1, wz)
+
+    # 4 triangular faces from base to apex
+    for i in range(4):
+        j = (i + 1) % 4
+        faces.append(_make_face([top_verts[i], top_verts[j], apex]))
+
+    # 4 triangular faces forming the bottom of the canopy
+    bottom_apex = Vec3(wx, canopy_center_y - canopy_radius * 0.5, wz)
+    for i in range(4):
+        j = (i + 1) % 4
+        faces.append(_make_face([top_verts[j], top_verts[i], bottom_apex]))
+
+    return faces
+
+
 def make_ground_quad(cx, cz, chunk_size):
     """Generate face data for a ground quad covering chunk (cx, cz).
 
@@ -919,8 +988,47 @@ class ForestWorld:
         self._last_face_count = 0       # for status-bar diagnostics
         self._last_mtn_chunks = 0       # mountain chunks loaded (diagnostics)
         self._mtn_cache: dict = {}      # (cx, cz) → bool — mountain noise cache
+        
+        # Special tree (golden oak) — spawns at random location ~10 sec walk from spawn
+        self.special_tree_pos = None    # (wx, wz, base_y) or None
+        self.special_tree_face_data = None  # pre-computed face data
+        self.spawn_pos = Vec3(6.0, 0.0, 6.0)  # player spawn position
+        self._special_tree_spawned = False
 
     # -- chunk loading / unloading ------------------------------------------
+
+    def _spawn_special_tree(self):
+        """Spawn the special golden oak tree at a random location ~10 sec walk from spawn."""
+        if self._special_tree_spawned:
+            return
+        
+        # Use a seeded RNG for deterministic spawn position based on world seed
+        rng = random.Random(self.seed + 999999)
+        
+        # Distance: Very close to spawn for immediate visibility
+        distance = 5.0 + rng.random() * 3.0  # 5-8 units (very close)
+        
+        # Random angle
+        angle = rng.random() * math.pi * 2
+        
+        # Calculate position
+        wx = self.spawn_pos.x + distance * math.sin(angle)
+        wz = self.spawn_pos.z + distance * math.cos(angle)
+        
+        # Get terrain height at this position
+        base_y = terrain_height(wx, wz, self.seed)
+        
+        # Store position
+        self.special_tree_pos = (wx, wz, base_y)
+        
+        # Generate oak tree with fixed height and random rotation
+        height = 3.5 + rng.random() * 0.5  # 3.5-4.0 units
+        tree_angle = rng.random() * math.pi * 2
+        
+        # Generate face data
+        self.special_tree_face_data = make_oak_tree(wx, wz, height, tree_angle, rng, base_y)
+        
+        self._special_tree_spawned = True
 
     def update(self, camera: 'Camera'):
         """Load / unload chunks based on camera position.
@@ -933,6 +1041,9 @@ class ForestWorld:
           3. Mountain-only terrain beyond terrain_rd where chunk_has_mountain()
              is true — renders distant peak silhouettes.
         """
+        # Spawn special tree on first update
+        self._spawn_special_tree()
+        
         self._cam_pos = camera.position
         self._cam_forward = camera.forward
 
@@ -1028,7 +1139,7 @@ class ForestWorld:
     # -- face data for the renderer -----------------------------------------
 
     def get_face_data(self) -> list:
-        """Return face data for all visible chunks.
+        """Return face data for all visible chunks plus special tree and path.
 
         Applies two culling passes:
           1. Behind-camera: chunks whose centre is behind the camera are
@@ -1069,6 +1180,40 @@ class ForestWorld:
                     continue
 
             result.extend(chunk.face_data)
+
+        # Add yellow path from spawn to special tree
+        if self.special_tree_pos is not None and self._special_tree_spawned:
+            wx, wz, base_y = self.special_tree_pos
+            spawn_x, spawn_y, spawn_z = self.spawn_pos.x, self.spawn_pos.y, self.spawn_pos.z
+            
+            # Generate path as a series of small markers along the path
+            path_length = math.sqrt((wx - spawn_x)**2 + (wz - spawn_z)**2)
+            num_markers = int(path_length / 1.5)  # One marker every 1.5 units for denser path
+            
+            # Yellow edge color for path markers - bright golden yellow
+            PATH_EDGE = '\033[38;2;255;255;0m#\033[0m'  # Bright yellow (#FFFF00)
+            
+            for i in range(num_markers + 1):
+                t = i / max(num_markers, 1)
+                px = spawn_x + t * (wx - spawn_x)
+                pz = spawn_z + t * (wz - spawn_z)
+                py = terrain_height(px, pz, self.seed) + 0.01
+                
+                # Diamond shape marker on ground - larger for visibility
+                marker_size = 0.6
+                v0 = Vec3(px, py, pz - marker_size)
+                v1 = Vec3(px + marker_size, py, pz)
+                v2 = Vec3(px, py, pz + marker_size)
+                v3 = Vec3(px - marker_size, py, pz)
+                
+                # Create quad face WITH yellow wireframe marker
+                face = _make_face([v0, v1, v2, v3])
+                # Add 4th element with yellow edge - wireframe-only rendering
+                result.append((face[0], face[1], face[2], PATH_EDGE))
+
+        # Add special tree (golden oak) - rendered as filled faces (no wireframe marker)
+        if self.special_tree_face_data is not None:
+            result.extend(self.special_tree_face_data)
 
         self._last_face_count = len(result)
         return result
@@ -1459,16 +1604,23 @@ class Renderer:
             # Quantised edge-string cache (21 levels per type, shared across
             # hundreds of terrain faces to avoid per-face f-string allocation)
             is_wire = wireframe is not None
-            q = int(fog_fade * 20)
-            cache_key = (is_wire, q)
-            edge_str = edge_cache.get(cache_key)
-            if edge_str is None:
-                ff = q * 0.05
-                if is_wire:
-                    edge_str = f'\033[38;2;{int(60*ff)};{int(90*ff)};{int(45*ff)}m.\033[0m'
-                else:
-                    edge_str = f'\033[38;2;{int(159*ff)};{int(239*ff)};0m#\033[0m'
-                edge_cache[cache_key] = edge_str
+            
+            # If wireframe marker is provided (like yellow path), use it directly
+            # Only apply fog fade to terrain wireframe (not special markers)
+            if is_wire and wireframe != '\033[38;2;60;90;45m.\033[0m':
+                # Special wireframe marker (e.g., yellow path) - preserve original color
+                edge_str = wireframe
+            else:
+                q = int(fog_fade * 20)
+                cache_key = (is_wire, q)
+                edge_str = edge_cache.get(cache_key)
+                if edge_str is None:
+                    ff = q * 0.05
+                    if is_wire:
+                        edge_str = f'\033[38;2;{int(60*ff)};{int(90*ff)};{int(45*ff)}m.\033[0m'
+                    else:
+                        edge_str = f'\033[38;2;{int(159*ff)};{int(239*ff)};0m#\033[0m'
+                    edge_cache[cache_key] = edge_str
 
             z_bias = 0.0 if is_wire else 0.005
             nv = len(projected)

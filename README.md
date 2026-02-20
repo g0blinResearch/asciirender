@@ -12,7 +12,9 @@ The project was then **extended significantly with [Claude Opus 4.6](https://www
 
 The entire Python terminal renderer was then **ported to HTML/JavaScript/WebGL** in a single Opus 4.6 session (42 tool exchanges, 2 completion cycles). This session analyzed all 22 subsystems in `run.py`, created a detailed architecture plan, then implemented 9 ES modules plus HTML/CSS — translating the CPU-based ASCII rasterizer into GPU-accelerated WebGL with GLSL shaders for lighting, fog, and wireframe rendering.
 
-Most recently, a **sky/horizon backdrop and rendering optimisation** session (105 tool exchanges, 18 completion cycles) added a gradient sky shader to the WebGL port, implemented three-tier chunk loading (full detail → terrain-only → mountain-only) to eliminate visual gaps between nearby and distant terrain, and applied five performance optimisations to the Python renderer: scanline rasteriser, inlined camera transforms, single-pass vertex projection, incremental z-interpolation in line drawing, and a fog-faded edge string cache.
+A **sky/horizon backdrop and rendering optimisation** session (105 tool exchanges, 18 completion cycles) added a gradient sky shader to the WebGL port, implemented three-tier chunk loading (full detail → terrain-only → mountain-only) to eliminate visual gaps between nearby and distant terrain, and applied five performance optimisations to the Python renderer: scanline rasteriser, inlined camera transforms, single-pass vertex projection, incremental z-interpolation in line drawing, and a fog-faded edge string cache.
+
+Most recently, a **special tree and yellow path** session (80 tool exchanges, 7 completion cycles) added a unique "golden oak" tree to the forest — visually distinct from regular pine trees with a thicker trunk and rounded canopy. The tree spawns at a random location 5-8 units from the player's spawn position (approximately 10 seconds walk away). A yellow diamond-shaped path is drawn from the player's starting location to the special tree, implemented in both the Python terminal renderer and the WebGL port.
 
 | Phase | Model | Sessions | Steps | Tool Exchanges | Description |
 |-------|-------|----------|-------|----------------|-------------|
@@ -22,7 +24,8 @@ Most recently, a **sky/horizon backdrop and rendering optimisation** session (10
 | Forest & terrain | Opus 4.6 | 1 | 21 | 144 | Infinite forest, terrain noise, mountains, distance fog, colour fading |
 | WebGL port | Opus 4.6 | 1 | 2 | 42 | Full HTML/JS/WebGL port of the Python terminal renderer |
 | Sky & optimisations | Opus 4.6 | 1 | 18 | 105 | WebGL sky shader, three-tier chunk loading, Python renderer optimisations |
-| **Total** | | **7** | **86** | **665** | |
+| Special tree & path | Opus 4.6 | 1 | 7 | 80 | Golden oak tree with unique canopy, yellow path markers from spawn |
+| **Total** | | **8** | **93** | **745** | |
 
 📋 **[Full prompt history →](prompt_history.md)** — every user prompt and assistant completion across all 7 sessions, extracted from the raw task logs.
 
@@ -133,6 +136,8 @@ python3 run.py --forest --fov 110              # wider field of view
 - **Procedural generation** — deterministic seeded RNG; same seed = same world
 - **Three-tier chunk streaming** — 12×12 world-unit chunks: full detail nearby, terrain-only at mid-range, mountain-only at far range
 - **Multi-tier pine trees** — 3-layer canopy with trunk (16 faces each)
+- **Special golden oak tree** — unique tree with thicker trunk and rounded canopy, spawned at random location 5-8 units from player spawn
+- **Yellow path markers** — diamond-shaped golden markers drawn from spawn location to the special tree
 - **Terrain** — two-octave smoothed value noise for rolling hills and valleys
 - **Mountains** — rare, very large peaks via low-frequency noise with cubic power curve
 - **Guaranteed landmark** — a 30-unit gaussian peak behind the spawn point for easy testing
@@ -219,7 +224,7 @@ run.py
 │   ├── Cube               8 verts, 6 quad faces
 │   ├── Car                16 verts, 12 quad faces
 │   └── HouseScene         28 verts, 20 mixed tri/quad faces
-├── Forest primitives      make_pine_tree, make_rock, make_bush, make_ground_quad
+├── Forest primitives      make_pine_tree, make_oak_tree, make_rock, make_bush, make_ground_quad
 ├── Terrain system         terrain_height (3-layer noise), make_terrain_grid
 ├── ForestChunk            Seeded procedural chunk with objects + terrain grid
 ├── ForestWorld            Chunk-based streaming manager (duck-typed as Model)
@@ -247,6 +252,8 @@ run.py
 | **Distance fog** | Per-pixel quadratic fade; fully fogged pixels skipped for performance |
 | **Height-based fog** | Mountain terrain wireframe gets reduced fog so peaks remain visible at range |
 | **Procedural terrain** | Two-octave value noise (rolling hills) + low-frequency mountain layer |
+| **Special tree** | Golden oak tree with thick trunk and rounded canopy, spawned 5-8 units from player |
+| **Yellow path** | Diamond-shaped markers with bright yellow edges from spawn to special tree |
 | **Scanline rasteriser** | Edge-intersection traversal replacing bounding-box + point-in-polygon (Python) |
 | **Chunk streaming** | Three-tier loading: full detail, terrain-only, mountain-only; 8 chunks/frame budget |
 | **Sky gradient** | Fullscreen quad GLSL shader with zenith→horizon→ground gradient (WebGL only) |
