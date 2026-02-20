@@ -27,7 +27,7 @@ Most recently, a **special tree and yellow path** session (80 tool exchanges, 7 
 | Special tree & path | Opus 4.6 | 1 | 7 | 80 | Golden oak tree with unique canopy, yellow path markers from spawn |
 | **Total** | | **8** | **93** | **745** | |
 
-📋 **[Full prompt history →](prompt_history.md)** — every user prompt and assistant completion across all 7 sessions, extracted from the raw task logs.
+📋 **[Full prompt history →](prompt_history.md)** — every user prompt and assistant completion across all 8 sessions, extracted from the raw task logs.
 
 ## Requirements
 
